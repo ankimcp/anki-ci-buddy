@@ -1,0 +1,15 @@
+# Sample AnkiInstance. metadata.name MUST equal spec.user (both the keycloakId, a
+# DNS-1123-safe UUID). Normally created by the lifecycle service, not by hand.
+apiVersion: anki.ankimcp.ai/v1alpha1
+kind: AnkiInstance
+metadata:
+  name: 3f9b2c1a-7d4e-4b21-9c8a-1e5f6a2b3c4d
+  namespace: anki-instances
+spec:
+  user: 3f9b2c1a-7d4e-4b21-9c8a-1e5f6a2b3c4d
+  # replicas is activator-owned (leave at default 0; the activator flips it to 1).
+  replicas: 0
+  # suspended is lifecycle-owned (dashboard power gate).
+  suspended: false
+  # image optionally pins/canaries this one user; empty uses the fleet image.
+  image: ""

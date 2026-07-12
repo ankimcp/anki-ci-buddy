@@ -1,0 +1,88 @@
+# Operator core permissions as a NAMESPACED Role in anki-instances (least privilege,
+# requirements-operator §8): every resource the operator touches — ankiinstances,
+# their status/finalizers, statefulsets, services, PVCs, events — is namespaced, and
+# the manager scopes its cache/clients to this one namespace (cmd/main.go), so a
+# cluster-wide ClusterRole grants strictly more than needed. Nothing here requires
+# cluster scope.
+#
+# NOTE (deviation from scaffold): controller-gen cannot generate a namespaced Role —
+# only a ClusterRole. This file is therefore hand-maintained, and `make manifests`
+# never touches it: the generated ClusterRole goes to the gitignored scratch dir
+# config/rbac/generated/ (a diff reference only). When the //+kubebuilder:rbac
+# markers change, fold the rule changes from generated/role.yaml into this file by
+# hand, keeping kind: Role + metadata.namespace (role_binding.yaml binds kind: Role).
+#
+# 2026-07-11 (requirements-operator §5.4/§8): the ankiinstances/finalizers grant is
+# REQUIRED (deletion finalizer for the PVC data-fate flow) and persistentvolumeclaims
+# carries `delete` for that flow ONLY — the operator still never creates PVCs (§4.6)
+# and still holds NO secrets verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: anki-operator-role
+  namespace: anki-instances
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - anki.ankimcp.ai
+  resources:
+  - ankiinstances
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - anki.ankimcp.ai
+  resources:
+  - ankiinstances/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - anki.ankimcp.ai
+  resources:
+  - ankiinstances/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

@@ -1,0 +1,255 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: ankiinstances.anki.ankimcp.ai
+spec:
+  group: anki.ankimcp.ai
+  names:
+    categories:
+    - ankimcp
+    kind: AnkiInstance
+    listKind: AnkiInstanceList
+    plural: ankiinstances
+    shortNames:
+    - anki
+    singular: ankiinstance
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.user
+      name: User
+      type: string
+    - description: activator intent
+      jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - description: admin gate
+      jsonPath: .spec.suspended
+      name: Suspended
+      type: boolean
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: ready pods (0/1)
+      jsonPath: .status.replicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.currentImage
+      name: Image
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AnkiInstance is the Schema for the ankiinstances API. One per user; the CR
+          metadata.name is the keycloakId, and children are named anki-<keycloakId>.
+
+          The root CEL rule enforces metadata.name == spec.user (both the keycloakId);
+          metadata.name is one of the two metadata fields CEL can read at the object root.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AnkiInstanceSpec defines the desired state of an AnkiInstance.
+
+              Field ownership is a hard control-plane contract (docs/contracts.md §2):
+                - spec.user, spec.suspended, spec.image  -> lifecycle service (anki-lifecycle)
+                - spec.replicas                          -> activator          (anki-activator)
+                - status.*                               -> operator           (anki-operator)
+
+              The operator never writes any spec field. It computes the child StatefulSet's
+              replicas as effectiveReplicas = (suspended ? 0 : replicas).
+            properties:
+              ankiConnect:
+                default: false
+                description: |-
+                  AnkiConnect is a reserved future toggle to gate the AnkiConnect surface.
+                  Present in the schema for forward-compat; it is inert in v1 (no-op).
+
+                  decision 12). Wire it to a container port / config only when the image and
+                  activator support it.
+                type: boolean
+              dataRetention:
+                default: Retain
+                description: |-
+                  DataRetention governs the per-user PVC's fate when the CR is deleted
+                  (requirements-operator §3.1/§5.4, added 2026-07-11): with Delete the
+                  operator's deletion finalizer deletes the PVC before releasing; with Retain
+                  (default, fail-safe) the PVC survives. This keeps the lifecycle service's
+                  RBAC free of workload-object verbs (docs/contracts.md §2). LIFECYCLE-OWNED.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              image:
+                description: |-
+                  Image is an optional per-instance image PIN / override (canary a single user).
+                  Empty means use the operator's fleet image (requirements-operator §7).
+                  LIFECYCLE-OWNED.
+                type: string
+              replicas:
+                default: 0
+                description: |-
+                  Replicas is the activator-owned wake/idle signal, constrained to {0,1}: a
+                  per-user unit is a single pod (RWOP structurally forbids two pods on the
+                  disk). 0 = idle-suspended, 1 = awake. ACTIVATOR-OWNED (docs/contracts.md §2);
+                  the operator reads it but never writes it.
+                format: int32
+                type: integer
+                x-kubernetes-validations:
+                - message: spec.replicas must be 0 or 1
+                  rule: self in [0, 1]
+              restartedAt:
+                description: |-
+                  RestartedAt is an optional RFC3339 timestamp acting as a restart nonce
+                  (requirements-operator §3.1, added 2026-07-11). When set/changed the operator
+                  copies the value VERBATIM into the StatefulSet pod template as the
+                  anki.ankimcp.ai/restartedAt annotation (the `kubectl rollout restart`
+                  pattern): the template hash changes, the StatefulSet controller recreates the
+                  pod, and the PVC is untouched. Empty/absent = no annotation. This is the
+                  platform's only restart mechanism (no live pod surgery). LIFECYCLE-OWNED.
+                type: string
+              suspended:
+                default: false
+                description: |-
+                  Suspended is the lifecycle-owned administrative power gate (dashboard on/off),
+                  orthogonal to the activator's replicas. When true the operator forces the
+                  StatefulSet to 0 regardless of replicas. LIFECYCLE-OWNED (docs/contracts.md §2).
+                type: boolean
+              user:
+                description: |-
+                  User is the tenant identity (the Keycloak sub / keycloakId). It is the same
+                  value as metadata.name and is immutable: it seeds the PVC / Secret / B2-prefix
+                  identity, so changing it would strand a disk (docs/contracts.md §3).
+                maxLength: 253
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: spec.user is immutable
+                  rule: self == oldSelf
+            required:
+            - user
+            type: object
+          status:
+            description: |-
+              AnkiInstanceStatus defines the observed state of an AnkiInstance. Written only
+              by the operator, via the status subresource (never bumps metadata.generation).
+            properties:
+              conditions:
+                description: Conditions follow the standard metav1.Condition shape
+                  (Ready/Progressing/Degraded).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentImage:
+                description: |-
+                  CurrentImage is the image the live/last-applied pod template carries, for
+                  eyeballing a fleet rollout.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation last reconciled, so callers
+                  (lifecycle service, activator) can tell whether the operator has caught up.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is a coarse human-facing summary (see AnkiInstancePhase).
+                enum:
+                - Provisioning
+                - Suspended
+                - Starting
+                - Running
+                - Error
+                type: string
+              replicas:
+                description: Replicas mirrors the StatefulSet's ready replicas (0/1)
+                  for kubectl/printers.
+                format: int32
+                type: integer
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: metadata.name must equal spec.user (both are the keycloakId)
+          rule: self.metadata.name == self.spec.user
+    served: true
+    storage: true
+    subresources:
+      status: {}

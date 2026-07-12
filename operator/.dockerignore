@@ -1,0 +1,7 @@
+bin/
+config/
+argocd/
+hack/
+*.md
+.git/
+cover.out

@@ -1,0 +1,20 @@
+# Least privilege: the operator's core permissions (Role anki-operator-role) are a
+# namespaced Role in anki-instances, bound here to the operator's ServiceAccount. A
+# RoleBinding referencing a Role must live in the Role's namespace, so this binding is
+# in anki-instances (requirements-operator §8). The operator never needs cluster-wide
+# reach over StatefulSets / Services.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: anki-operator-rolebinding
+  namespace: anki-instances
+  labels:
+    app.kubernetes.io/name: anki-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: anki-operator-role
+subjects:
+  - kind: ServiceAccount
+    name: anki-operator-controller-manager
+    namespace: anki-operator-system

@@ -1,0 +1,15 @@
+# Binaries / build output
+bin/
+cover.out
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# Local env
+.env
+
+# controller-gen scratch output from `make manifests` (diff reference only; the
+# shipped RBAC is the hand-maintained namespaced config/rbac/role.yaml)
+config/rbac/generated/

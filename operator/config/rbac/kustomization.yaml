@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # Operator permissions (hand-maintained namespaced Role — see role.yaml header;
+  # controller-gen output goes to config/rbac/generated/ as a diff reference) — least
+  # privilege: NO secrets, NO ciliumnetworkpolicies (see requirements-operator §8).
+  - role.yaml
+  - role_binding.yaml
+  - leader_election_role.yaml
+  - service_account.yaml
+  # The zero-permission SA the per-user pods run as.
+  - anki_pod_service_account.yaml

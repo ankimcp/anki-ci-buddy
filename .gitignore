@@ -1,0 +1,22 @@
+# Build output
+*.ankiaddon
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Anki add-on runtime state (never commit)
+**/meta.json
+**/user_files/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude drafts (scratch design notes)
+.claude-drafts/

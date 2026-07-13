@@ -1,5 +1,10 @@
 # requirements-activator — Activator (data-plane proxy)
 
+> **Implementation moved out (2026-07-13):** the activator's code now lives in its own repo,
+> [anki-container-activator](https://github.com/ankimcp/anki-container-activator) — **not** in this
+> repo. This document stays here as the activator's requirements spec; paths like `activator/…`
+> below refer to that repo's layout, not a subfolder of anki-ci-buddy.
+
 > **SHELVED FOR v1 (2026-07-11, user — see [ARCHITECTURE §16](./ARCHITECTURE.md) and
 > [contracts.md](./contracts.md)):** v1 ships **without deploying the activator**. The 2026-07-11
 > pivot made the SaaS **tunnel** the MCP door for hosted pods (the baked AnkiMCP add-on dials
@@ -9,7 +14,8 @@
 > **VNC door** → the new **VNC gateway** (dumb authenticated pipe: api-minted signed ticket,
 > naming-convention pod resolution, no wake/k8s/DB). The CR spec is **single-writer (lifecycle)**
 > for v1 — this doc's `spec.replicas` ownership is shelved with the component (contracts.md §2).
-> The built Go code stays in `activator/`; formally retiring vs reviving it is **POSTPONED, not
+> The built Go code lives in the [anki-container-activator](https://github.com/ankimcp/anki-container-activator)
+> repo; formally retiring vs reviving it is **POSTPONED, not
 > decided**. The body below is retained **unmodified** as the revival spec — read it as
 > historical.
 
@@ -30,7 +36,7 @@ CRD** existing (it patches CRs and watches the pods the operator creates) and on
 **headless-anki image** exposing the MCP + noVNC ports.
 
 Target: **Go 1.23+**, `client-go` (typed clientset + `dynamic` client + informers),
-`net/http` / `net/http/httputil`. Lives in this monorepo under `activator/`.
+`net/http` / `net/http/httputil`. Lives in its own repo, [anki-container-activator](https://github.com/ankimcp/anki-container-activator) (paths below are relative to that repo root).
 
 Shared cross-component values (GVR, CR field ownership, naming, namespace, labels, ports) are fixed
 in [contracts.md](./contracts.md); this doc restates them for context and must match it. Key ones:

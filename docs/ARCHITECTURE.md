@@ -413,10 +413,15 @@ subfolders, then bound together. Implementation starts only on explicit go-ahead
 anki-ci-buddy/            ← platform monorepo (name may outgrow itself)
 ├── docs/                 ← this doc + per-component requirements
 ├── addon/                ← ci-buddy add-on (spec: ../REQUIREMENTS.md)
-├── activator/            ← custom activator (Go)
 ├── operator/             ← AnkiInstance CRD + reconciler (Go)
 └── ...                   ← further components as they materialize
 ```
+
+> **Moved out (2026-07-13):** the **activator** (custom Go data-plane proxy) is **no longer a
+> subfolder here** — its code lives in its own repo,
+> [anki-container-activator](https://github.com/ankimcp/anki-container-activator). It remains a
+> component of the overall architecture (see §7 / §16.2 and `requirements-activator.md`), but v1
+> does not deploy it.
 
 Open detail: whether the **lifecycle service** also lands here or stays an atomic service inside
 `anki-mcp-saas` (the earlier decision) — to be confirmed.
@@ -494,8 +499,9 @@ the credentials Secret (contracts.md §8c). The tunnel is the MCP door for hoste
 
 ### 16.2 Activator SHELVED for v1 (postponed, not deleted)
 
-v1 ships **without deploying the activator**. The built Go component stays on the shelf in this
-repo; formally retiring vs reviving it is **POSTPONED, not decided**. Its jobs are redistributed:
+v1 ships **without deploying the activator**. The built Go component lives on the shelf in its own
+repo ([anki-container-activator](https://github.com/ankimcp/anki-container-activator)); formally
+retiring vs reviving it is **POSTPONED, not decided**. Its jobs are redistributed:
 
 | Former activator job | v1 owner |
 |---|---|

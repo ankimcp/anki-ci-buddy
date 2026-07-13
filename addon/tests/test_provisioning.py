@@ -453,6 +453,9 @@ def test_ensure_render_latex_sets_when_off(monkeypatch, logs):
     assert prov.ensure_render_latex(col) is True
     assert col._latex is True
     assert any(c[0] == "set" and c[2] is True for c in col.calls)
+    # observability: the enable path emits exactly one greppable log line
+    latex_logs = [l for l in logs if "force-enabled RENDER_LATEX" in l]
+    assert len(latex_logs) == 1
 
 
 def test_ensure_render_latex_idempotent_when_already_on(monkeypatch, logs):
@@ -463,6 +466,8 @@ def test_ensure_render_latex_idempotent_when_already_on(monkeypatch, logs):
     # already on → no write (must not re-dirty the collection)
     assert prov.ensure_render_latex(col) is False
     assert not any(c[0] == "set" for c in col.calls)
+    # the anti-loop no-op stays silent — no force-enable log line
+    assert not any("force-enabled RENDER_LATEX" in l for l in logs)
 
 
 def test_ensure_render_latex_noop_when_no_collection(monkeypatch, logs):

@@ -310,7 +310,10 @@ class CollectionConfigProvisioner:
             return False  # already on — nothing to do (and don't re-dirty)
 
         col.set_config_bool(Config.Bool.RENDER_LATEX, True)
-        self._print("[ci_buddy] enabled LaTeX image generation (RENDER_LATEX)")
+        self._print(
+            "[ci_buddy] force-enabled RENDER_LATEX (LaTeX image generation) "
+            "on the collection"
+        )
         return True
 
     def _current_col(self) -> Any:

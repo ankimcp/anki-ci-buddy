@@ -1,0 +1,22 @@
+{
+  "managed_by_label": "Managed environment — settings are locked",
+  "hide_vs_disable": "hide",
+  "lock_preferences": true,
+  "lock_addons": true,
+  "lock_addon_config_writes": true,
+  "lock_profile_switch": true,
+  "lock_upgrade_downgrade": true,
+  "lock_note_types": false,
+  "lock_import": true,
+  "lock_open_backup": true,
+  "lock_database_check": false,
+  "lock_debug_console": true,
+  "strip_sync_link": false,
+  "provisioning_enabled": false,
+  "credentials_path": "/run/ankimcp/sync-credentials.json",
+  "credentials_poll_seconds": 2,
+  "endpoint_allowlist": ["ankiweb.net", "ankiuser.net"],
+  "clear_key_on_close": true,
+  "disable_native_auto_sync": false,
+  "ensure_latex_generation": true
+}

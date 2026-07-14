@@ -18,5 +18,6 @@
   "endpoint_allowlist": ["ankiweb.net", "ankiuser.net"],
   "clear_key_on_close": true,
   "disable_native_auto_sync": false,
-  "ensure_latex_generation": true
+  "ensure_latex_generation": true,
+  "hide_ankimcp_toolbar_indicator": true
 }

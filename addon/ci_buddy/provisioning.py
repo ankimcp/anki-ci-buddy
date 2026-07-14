@@ -331,18 +331,120 @@ class CollectionConfigProvisioner:
         self.ensure_render_latex(self._current_col())
 
 
+def _real_write_config(manager: Any) -> Callable[..., Any] | None:
+    """Return the ``addonManager.writeConfig`` that actually persists to
+    ``meta.json`` — even after locks Seam 4 has shimmed it to drop writes.
+
+    ``locks.install_write_config_shim`` replaces ``manager.writeConfig`` with a
+    shim that silently DROPS every write, and stashes the genuine original on
+    that shim under ``core.ORIGINAL_WRITE_CONFIG_ATTR`` (the shared constant —
+    single source of truth for both sides of the contract). We recover it here
+    so ci-buddy can durably write a *sibling* add-on's config (AnkiMCP's toolbar
+    indicator).
+
+    This is deliberately robust to registration order and does NOT import
+    ``locks`` (the two modules stay decoupled): if the shim is installed — no
+    matter whether ``locks.register`` ran before or after us — the original is on
+    the attribute; if no shim is installed (``lock_addon_config_writes: false``,
+    or provisioning wired before locks), the live ``writeConfig`` is already the
+    real one and ``getattr`` falls through to it.
+    """
+    write_config = getattr(manager, "writeConfig", None)
+    if write_config is None:
+        return None
+    return getattr(write_config, core.ORIGINAL_WRITE_CONFIG_ATTR, write_config)
+
+
+class AddonConfigProvisioner:
+    """Coerce a *sibling* add-on's config in the managed environment.
+
+    Currently this hides the AnkiMCP top-toolbar indicator: the AnkiMCP server
+    add-on (``anki_mcp_server``) ships ``show_toolbar_indicator=true``, which
+    draws a persistent "[• AnkiMCP]" button in Anki's top toolbar. On the hosted
+    appliance that surface is unwanted, so ci-buddy forces the key false.
+
+    Unlike the other provisioners this runs at ADD-ON LOAD time, NOT on a
+    gui_hook. AnkiMCP reads ``show_toolbar_indicator`` exactly once, inside its
+    ``main_window_did_init`` handler (``_setup_menu``), and aqt fires that hook
+    only after every add-on has finished importing. ci-buddy writes the value
+    during its own import — strictly before that hook — so the indicator is
+    hidden the SAME session, not merely next launch. (Registering the write on
+    ci-buddy's own ``main_window_did_init`` would be too late: AnkiMCP loads
+    first alphabetically, so its handler runs before ours.)
+
+    The write goes through ``_real_write_config`` so it survives Seam 4's
+    write-dropping shim; if AnkiMCP isn't installed or the key is already false,
+    it is a safe no-op (see ``core.plan_hide_ankimcp_indicator``).
+    """
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        printer: Callable[[str], None] = print,
+    ) -> None:
+        self._config = config
+        self._print = printer
+
+    def hide_ankimcp_indicator(self, manager: Any) -> bool:
+        """Force ``anki_mcp_server``'s ``show_toolbar_indicator`` false via
+        ``manager`` (an ``addonManager``). Returns True iff it wrote a change.
+
+        No-op (False) when: no manager, AnkiMCP isn't installed / has no config,
+        or the flag is already false. Fail-open — the caller wraps this in
+        ``_safe`` so a broken/absent AnkiMCP can never crash startup.
+        """
+        if manager is None:
+            return False
+        get_config = getattr(manager, "getConfig", None)
+        if get_config is None:
+            return False
+
+        current = get_config(core.ANKIMCP_PACKAGE)
+        new_config = core.plan_hide_ankimcp_indicator(current)
+        if new_config is None:
+            return False  # not installed / no config / already hidden
+
+        write_config = _real_write_config(manager)
+        if write_config is None:
+            return False
+        write_config(core.ANKIMCP_PACKAGE, new_config)
+        self._print(
+            "[ci_buddy] hid AnkiMCP toolbar indicator "
+            "(forced anki_mcp_server show_toolbar_indicator=false)"
+        )
+        return True
+
+    def _current_manager(self) -> Any:
+        """Return ``mw.addonManager`` if present, else ``None``."""
+        from aqt import mw  # lazy — keeps this module import-safe for tests
+
+        return getattr(mw, "addonManager", None)
+
+    def on_register(self) -> None:
+        """Apply the coercion once, at add-on load time."""
+        self.hide_ankimcp_indicator(self._current_manager())
+
+
 def register(config: dict[str, Any]) -> SyncProvisioner:
     """Wire up Part B hooks. Returns the ``SyncProvisioner`` (mainly for testing
     / introspection).
 
-    The two provisioners are independently config-gated: credential injection on
-    ``provisioning_enabled`` and LaTeX enforcement on ``ensure_latex_generation``.
+    The provisioners are independently config-gated: credential injection on
+    ``provisioning_enabled``, LaTeX enforcement on ``ensure_latex_generation``,
+    and the AnkiMCP toolbar-indicator hide on ``hide_ankimcp_toolbar_indicator``.
     """
     provisioner = SyncProvisioner(config)
     latex_provisioner = CollectionConfigProvisioner(config)
 
     provisioning_on = config.get("provisioning_enabled", False)
     latex_on = config.get("ensure_latex_generation", True)
+    hide_indicator_on = config.get("hide_ankimcp_toolbar_indicator", True)
+
+    # Sibling-add-on coercion runs NOW (at load), not on a hook — it must land
+    # before AnkiMCP reads the flag at main_window_did_init. See
+    # AddonConfigProvisioner for the same-session-vs-next-launch reasoning.
+    if hide_indicator_on:
+        _safe(AddonConfigProvisioner(config).on_register)()
 
     if not provisioning_on and not latex_on:
         return provisioner

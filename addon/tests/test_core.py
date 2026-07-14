@@ -194,3 +194,34 @@ def test_sync_link_detection():
     # the nested spinner id must not trigger a false positive on its own
     spinner_only = "<img id=sync-spinner>"
     assert core.is_sync_toolbar_link(spinner_only) is False
+
+
+# --- hide AnkiMCP toolbar indicator (plan) ------------------------------- #
+
+
+def test_plan_hide_ankimcp_flips_true_to_false():
+    current = {"show_toolbar_indicator": True, "port": 8765}
+    plan = core.plan_hide_ankimcp_indicator(current)
+    assert plan is not None
+    assert plan["show_toolbar_indicator"] is False
+    # other keys preserved, and the input dict is not mutated
+    assert plan["port"] == 8765
+    assert current["show_toolbar_indicator"] is True
+
+
+def test_plan_hide_ankimcp_idempotent_when_already_false():
+    # already hidden → no-op, so we never re-dirty AnkiMCP's meta.json
+    assert core.plan_hide_ankimcp_indicator({"show_toolbar_indicator": False}) is None
+
+
+@pytest.mark.parametrize("current", [None, {}])
+def test_plan_hide_ankimcp_noop_when_absent(current):
+    # AnkiMCP not installed / no config → safe no-op
+    assert core.plan_hide_ankimcp_indicator(current) is None
+
+
+def test_plan_hide_ankimcp_writes_when_key_missing():
+    # key absent (e.g. an old AnkiMCP build) → force it false
+    plan = core.plan_hide_ankimcp_indicator({"port": 8765})
+    assert plan is not None
+    assert plan["show_toolbar_indicator"] is False

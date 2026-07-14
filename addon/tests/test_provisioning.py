@@ -16,6 +16,7 @@ import pytest
 
 from ci_buddy import core
 from ci_buddy.provisioning import (
+    AddonConfigProvisioner,
     CollectionConfigProvisioner,
     SyncProvisioner,
     register,
@@ -520,3 +521,147 @@ def test_register_skips_latex_hooks_when_flag_off(monkeypatch):
     )
     assert gui_hooks.collection_did_load.callbacks == []
     assert gui_hooks.sync_did_finish.callbacks == []
+
+
+# --- hide AnkiMCP toolbar indicator ------------------------------------- #
+
+
+class FakeAddonManager:
+    """Minimal stand-in for aqt's AddonManager (getConfig/writeConfig)."""
+
+    def __init__(self, configs=None):
+        # module -> merged config dict (what getConfig returns)
+        self._configs = dict(configs or {})
+        self.writes: list[tuple] = []
+
+    def getConfig(self, module):
+        return self._configs.get(module)
+
+    def writeConfig(self, module, conf):
+        self.writes.append((module, conf))
+        self._configs[module] = conf
+
+
+def make_addon_provisioner(logs, **overrides):
+    config = core.merge_config(overrides)
+    return AddonConfigProvisioner(config, printer=logs.append)
+
+
+def test_hide_indicator_flips_true_to_false(logs):
+    prov = make_addon_provisioner(logs)
+    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+
+    assert prov.hide_ankimcp_indicator(mgr) is True
+    assert mgr.writes == [(core.ANKIMCP_PACKAGE, {"show_toolbar_indicator": False})]
+    assert any("hid AnkiMCP toolbar indicator" in l for l in logs)
+
+
+def test_hide_indicator_idempotent_when_already_false(logs):
+    prov = make_addon_provisioner(logs)
+    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": False}})
+
+    assert prov.hide_ankimcp_indicator(mgr) is False
+    assert mgr.writes == []  # never re-writes an already-hidden indicator
+
+
+def test_hide_indicator_noop_when_ankimcp_absent(logs):
+    prov = make_addon_provisioner(logs)
+    mgr = FakeAddonManager({})  # AnkiMCP not installed → getConfig returns None
+
+    assert prov.hide_ankimcp_indicator(mgr) is False
+    assert mgr.writes == []
+
+
+def test_hide_indicator_noop_when_no_manager(logs):
+    prov = make_addon_provisioner(logs)
+    assert prov.hide_ankimcp_indicator(None) is False
+
+
+def test_hide_indicator_uses_original_writeconfig_through_shim(logs):
+    # The core interaction: locks Seam 4 replaces writeConfig with a shim that
+    # DROPS writes but stashes the original on itself under
+    # core.ORIGINAL_WRITE_CONFIG_ATTR (the shared contract constant; the
+    # producer side is asserted in test_locks.py). The provisioner must recover
+    # and use that original so the write persists.
+    real_writes: list[tuple] = []
+
+    def real_write_config(module, conf):
+        real_writes.append((module, conf))
+
+    def dropping_shim(module, conf):
+        # mimics locks._blocked_write_config — silently drops the write
+        pass
+
+    dropping_shim._ci_buddy_shim = True
+    setattr(dropping_shim, core.ORIGINAL_WRITE_CONFIG_ATTR, real_write_config)
+
+    mgr = types.SimpleNamespace(
+        getConfig=lambda module: {"show_toolbar_indicator": True}
+        if module == core.ANKIMCP_PACKAGE
+        else None,
+        writeConfig=dropping_shim,
+    )
+
+    prov = make_addon_provisioner(logs)
+    assert prov.hide_ankimcp_indicator(mgr) is True
+    # persisted via the ORIGINAL, not dropped by the shim
+    assert real_writes == [(core.ANKIMCP_PACKAGE, {"show_toolbar_indicator": False})]
+
+
+def test_real_write_config_falls_through_without_shim():
+    mgr = FakeAddonManager()
+    # no shim installed → the live writeConfig is already the real one
+    from ci_buddy.provisioning import _real_write_config
+
+    # (== not is: mgr.writeConfig yields a fresh bound-method wrapper each access)
+    assert _real_write_config(mgr) == mgr.writeConfig
+
+
+def test_register_hides_indicator_at_load_time(monkeypatch):
+    # register() must coerce the indicator immediately (not on a hook), using
+    # the addonManager on mw.
+    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.mw = types.SimpleNamespace(addonManager=mgr)
+    aqt_mod.gui_hooks = types.SimpleNamespace(
+        profile_did_open=FakeHook(),
+        profile_will_close=FakeHook(),
+        collection_did_load=FakeHook(),
+        sync_did_finish=FakeHook(),
+    )
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+
+    register(
+        core.merge_config(
+            {
+                "provisioning_enabled": False,
+                "ensure_latex_generation": False,
+                "hide_ankimcp_toolbar_indicator": True,
+            }
+        )
+    )
+    assert mgr.writes == [(core.ANKIMCP_PACKAGE, {"show_toolbar_indicator": False})]
+
+
+def test_register_skips_indicator_when_flag_off(monkeypatch):
+    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.mw = types.SimpleNamespace(addonManager=mgr)
+    aqt_mod.gui_hooks = types.SimpleNamespace(
+        profile_did_open=FakeHook(),
+        profile_will_close=FakeHook(),
+        collection_did_load=FakeHook(),
+        sync_did_finish=FakeHook(),
+    )
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+
+    register(
+        core.merge_config(
+            {
+                "provisioning_enabled": False,
+                "ensure_latex_generation": False,
+                "hide_ankimcp_toolbar_indicator": False,
+            }
+        )
+    )
+    assert mgr.writes == []

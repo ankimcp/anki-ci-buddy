@@ -85,6 +85,29 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 > `tikz` + `dvisvgm` LaTeX preamble — that is note-type/collection data, not an
 > add-on setting, and is out of scope here.
 
+### Sibling add-on coordination
+
+| Key | Default | Meaning |
+|---|---|---|
+| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's (`anki_mcp_server`) `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. Safe no-op if AnkiMCP isn't installed, exposes no config, or already has the flag off (idempotent — never re-writes `meta.json`). Independent of `provisioning_enabled`. |
+
+> **How it beats the write-lock, and why it takes effect the same session.**
+> This is the one place ci-buddy durably writes *another* add-on's config, so it
+> must dodge the Seam 4 write shim (`lock_addon_config_writes`), which otherwise
+> silently drops all `addonManager.writeConfig` calls. It does so by writing
+> through the **original** `writeConfig` that the shim preserves — recovered via
+> an attribute the shim stashes on itself, so it works whether the shim is
+> installed before or after (robust to registration order) and without coupling
+> the two modules.
+>
+> The write happens at ci-buddy **add-on load time**, not on a GUI hook. AnkiMCP
+> reads `show_toolbar_indicator` exactly once, inside its `main_window_did_init`
+> handler, and Anki fires that hook only after every add-on has finished
+> importing — so ci-buddy's load-time write lands *before* AnkiMCP reads the
+> flag. The indicator is therefore hidden on the **very first** window of the
+> session (not just after a restart, which is what a manual config edit would
+> require).
+
 ### Credentials file contract
 
 ci-buddy reads a single JSON file (written atomically by the operator / Secret

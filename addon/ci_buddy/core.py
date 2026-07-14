@@ -51,6 +51,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "clear_key_on_close": True,
     "disable_native_auto_sync": False,
     "ensure_latex_generation": True,
+    "hide_ankimcp_toolbar_indicator": True,
 }
 
 #: Known config keys (used to warn about typos / stale keys — never crash).
@@ -264,3 +265,54 @@ def is_sync_toolbar_link(link_html: str) -> bool:
     (no quotes), so this does not false-positive on it.
     """
     return 'id="sync"' in link_html
+
+
+# --------------------------------------------------------------------------- #
+# Sibling add-on coercion — hide the AnkiMCP top-toolbar indicator
+# --------------------------------------------------------------------------- #
+
+#: Attribute under which locks Seam 4's write-dropping ``writeConfig`` shim
+#: stashes the genuine original ``writeConfig``. Single source of truth for the
+#: producer (``locks.install_write_config_shim``) and the consumer
+#: (``provisioning._real_write_config``) — both modules already import ``core``,
+#: so the contract has one name and can't silently drift between them.
+ORIGINAL_WRITE_CONFIG_ATTR = "_ci_buddy_original"
+
+#: Package / config namespace of the AnkiMCP server add-on that ci-buddy runs
+#: alongside on the hosted appliance. This is the add-on folder name and the
+#: ``module`` passed to ``addonManager.getConfig``/``writeConfig``.
+#: NOTE: assumes the deployed-by-folder-name install (the hosted image); an
+#: AnkiWeb install uses a numeric folder ID instead, so there this silently
+#: no-ops (fail-open).
+ANKIMCP_PACKAGE = "anki_mcp_server"
+
+#: The AnkiMCP config key that renders the persistent "[• AnkiMCP]" button in
+#: Anki's top toolbar. ci-buddy forces this false in the managed environment.
+ANKIMCP_TOOLBAR_INDICATOR_KEY = "show_toolbar_indicator"
+
+
+def plan_hide_ankimcp_indicator(
+    ankimcp_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Decide what (if anything) to write back into AnkiMCP's config to hide its
+    top-toolbar indicator.
+
+    Returns a NEW config dict (a shallow copy with ``show_toolbar_indicator``
+    forced to ``False``) when a durable write is needed, or ``None`` for a safe
+    no-op:
+
+    - ``ankimcp_config`` is ``None``/empty → AnkiMCP is not installed or exposes
+      no config → nothing to do.
+    - the key is already exactly ``False`` → idempotent no-op (same write-only-
+      when-needed spirit as ``CollectionConfigProvisioner.ensure_render_latex``),
+      so ci-buddy never re-writes ``meta.json`` on a subsequent load.
+
+    Pure/decision-only: the caller performs the actual write.
+    """
+    if not ankimcp_config:
+        return None
+    if ankimcp_config.get(ANKIMCP_TOOLBAR_INDICATOR_KEY) is False:
+        return None
+    new_config = dict(ankimcp_config)
+    new_config[ANKIMCP_TOOLBAR_INDICATOR_KEY] = False
+    return new_config

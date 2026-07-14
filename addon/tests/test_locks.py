@@ -71,6 +71,16 @@ def test_write_config_shim_drops_writes(monkeypatch):
     locks._original_write_config("some.module", {"y": 2})
     assert mgr.written == [("some.module", {"y": 2})]
 
+    # Producer side of the cross-module contract: the shim must expose the
+    # genuine original on itself under core.ORIGINAL_WRITE_CONFIG_ATTR — this is
+    # what provisioning._real_write_config recovers to persist a sibling
+    # add-on's config despite the write lock. Calling the exposed original must
+    # actually persist (not drop) a write.
+    exposed = getattr(mgr.writeConfig, core.ORIGINAL_WRITE_CONFIG_ATTR, None)
+    assert exposed == original
+    exposed("other.module", {"z": 3})
+    assert ("other.module", {"z": 3}) in mgr.written
+
 
 def test_write_config_shim_is_idempotent(monkeypatch):
     mgr = FakeAddonManager()

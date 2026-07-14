@@ -278,17 +278,60 @@ def is_sync_toolbar_link(link_html: str) -> bool:
 #: so the contract has one name and can't silently drift between them.
 ORIGINAL_WRITE_CONFIG_ATTR = "_ci_buddy_original"
 
-#: Package / config namespace of the AnkiMCP server add-on that ci-buddy runs
-#: alongside on the hosted appliance. This is the add-on folder name and the
-#: ``module`` passed to ``addonManager.getConfig``/``writeConfig``.
-#: NOTE: assumes the deployed-by-folder-name install (the hosted image); an
-#: AnkiWeb install uses a numeric folder ID instead, so there this silently
-#: no-ops (fail-open).
+#: The AnkiMCP server add-on's manifest ``package`` field — the STABLE identity
+#: ci-buddy searches for among installed add-ons. This is NOT necessarily the
+#: on-disk directory name: on the hosted image AnkiMCP is installed under the
+#: directory ``ankimcp`` while its ``manifest.json`` still declares
+#: ``"package": "anki_mcp_server"``. Anki keys ``addonManager.getConfig`` /
+#: ``writeConfig`` by the *directory* name, so ci-buddy resolves the directory
+#: from this package (see ``resolve_addon_dir_by_package``) instead of assuming
+#: the two are equal — they only coincide on a source/dev install.
 ANKIMCP_PACKAGE = "anki_mcp_server"
 
 #: The AnkiMCP config key that renders the persistent "[• AnkiMCP]" button in
 #: Anki's top toolbar. ci-buddy forces this false in the managed environment.
 ANKIMCP_TOOLBAR_INDICATOR_KEY = "show_toolbar_indicator"
+
+
+def resolve_addon_dir_by_package(
+    installed: Iterable[tuple[str, str | None]],
+    package: str,
+    printer: Callable[[str], None] = print,
+) -> str | None:
+    """Return the *directory* name of the installed add-on whose manifest
+    ``package`` equals ``package``, or ``None`` if none match.
+
+    ``installed`` is an iterable of ``(dir_name, manifest_package)`` pairs — one
+    per installed add-on. ``manifest_package`` is ``None`` for an add-on with no
+    or unreadable manifest, which therefore never matches.
+
+    Anki keys ``addonManager.getConfig``/``writeConfig`` by the on-disk directory
+    name, but that name is not stable across installs: on the hosted image
+    AnkiMCP lives in directory ``ankimcp`` while its manifest still declares
+    ``package = "anki_mcp_server"``. Matching on the manifest package and
+    returning the *directory* is what lets ci-buddy address the sibling add-on
+    regardless of how it was installed (the historical bug assumed the directory
+    name equalled the package and silently no-op'd on the hosted image).
+
+    First match wins (deterministic, in iteration order). On a multi-match a
+    distinctive line is logged and the first is used; on no match a distinctive,
+    greppable warning is logged (fail-open — the caller then no-ops). ``printer``
+    is injected so this stays pure and unit-testable.
+    """
+    matches = [dir_name for dir_name, pkg in installed if pkg == package]
+    if not matches:
+        printer(
+            f"[ci_buddy] CI_BUDDY_ADDON_PACKAGE_NOT_FOUND — no installed add-on "
+            f"declares manifest package {package!r}; cannot resolve its "
+            "directory (dependent feature no-op)"
+        )
+        return None
+    if len(matches) > 1:
+        printer(
+            f"[ci_buddy] multiple add-ons declare manifest package {package!r} "
+            f"({matches!r}); using the first ({matches[0]!r})"
+        )
+    return matches[0]
 
 
 def plan_hide_ankimcp_indicator(

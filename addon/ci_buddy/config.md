@@ -89,7 +89,18 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's (`anki_mcp_server`) `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. Safe no-op if AnkiMCP isn't installed, exposes no config, or already has the flag off (idempotent — never re-writes `meta.json`). Independent of `provisioning_enabled`. |
+| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. Safe no-op if AnkiMCP isn't installed, exposes no config, or already has the flag off (idempotent — never re-writes `meta.json`). Independent of `provisioning_enabled`. |
+
+> **How AnkiMCP is located (directory vs. manifest package).** Anki keys
+> `addonManager.getConfig`/`writeConfig` by an add-on's on-disk **directory**
+> name, which is not stable across installs — on the hosted image AnkiMCP is
+> installed under the directory `ankimcp`, while its `manifest.json` still
+> declares `"package": "anki_mcp_server"`. ci-buddy therefore does **not** assume
+> the directory equals the package: it scans installed add-ons
+> (`addonManager.allAddons()`), reads each one's `manifest.json` `package`, and
+> uses the matching add-on's directory as the config key. If no installed add-on
+> declares package `anki_mcp_server`, ci-buddy logs a distinctive, greppable
+> warning (`CI_BUDDY_ADDON_PACKAGE_NOT_FOUND`) and no-ops (fail-open).
 
 > **How it beats the write-lock, and why it takes effect the same session.**
 > This is the one place ci-buddy durably writes *another* add-on's config, so it

@@ -9,7 +9,9 @@ Covers spec §8 items 6-10:
 """
 
 import json
+import os
 import sys
+import tempfile
 import types
 
 import pytest
@@ -527,12 +529,45 @@ def test_register_skips_latex_hooks_when_flag_off(monkeypatch):
 
 
 class FakeAddonManager:
-    """Minimal stand-in for aqt's AddonManager (getConfig/writeConfig)."""
+    """Stand-in for aqt's AddonManager.
 
-    def __init__(self, configs=None):
-        # module -> merged config dict (what getConfig returns)
+    Backed by a real temp addons folder so the provisioner's on-disk
+    ``manifest.json`` reading (``_installed_addon_packages``) runs against actual
+    files, exercising the enumeration + directory-resolution path end-to-end.
+
+    - ``configs`` maps a *directory* name → the dict ``getConfig`` returns.
+    - ``packages`` maps a directory name → its manifest ``package`` field; a
+      directory absent from ``packages`` defaults to ``package == dir_name`` (the
+      dev/source install where the two coincide). A directory mapped to ``None``
+      models an add-on with no ``package`` in its manifest.
+
+    Exposes the enumeration API the provisioner uses: ``allAddons()`` (directory
+    names) and ``addonsFolder(dir)`` (path holding that add-on's manifest.json).
+    """
+
+    def __init__(self, configs=None, packages=None):
         self._configs = dict(configs or {})
+        packages = dict(packages or {})
         self.writes: list[tuple] = []
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = self._tmp.name
+        for dir_name in self._configs:
+            folder = os.path.join(self._root, dir_name)
+            os.makedirs(folder, exist_ok=True)
+            manifest = {"name": dir_name}
+            package = packages.get(dir_name, dir_name)
+            if package is not None:
+                manifest["package"] = package
+            with open(
+                os.path.join(folder, "manifest.json"), "w", encoding="utf-8"
+            ) as fh:
+                json.dump(manifest, fh)
+
+    def allAddons(self):
+        return sorted(self._configs)
+
+    def addonsFolder(self, module=None):
+        return self._root if module is None else os.path.join(self._root, module)
 
     def getConfig(self, module):
         return self._configs.get(module)
@@ -564,17 +599,76 @@ def test_hide_indicator_idempotent_when_already_false(logs):
     assert mgr.writes == []  # never re-writes an already-hidden indicator
 
 
+def test_hide_indicator_resolves_dir_when_it_differs_from_package(logs):
+    # THE REGRESSION: hosted image installs AnkiMCP under directory 'ankimcp'
+    # while its manifest still declares package 'anki_mcp_server'. getConfig/
+    # writeConfig are keyed by the DIRECTORY, so the write must target 'ankimcp'.
+    prov = make_addon_provisioner(logs)
+    mgr = FakeAddonManager(
+        configs={"ankimcp": {"show_toolbar_indicator": True}},
+        packages={"ankimcp": core.ANKIMCP_PACKAGE},
+    )
+
+    assert prov.hide_ankimcp_indicator(mgr) is True
+    assert mgr.writes == [("ankimcp", {"show_toolbar_indicator": False})]
+    assert any("hid AnkiMCP toolbar indicator" in l for l in logs)
+
+
 def test_hide_indicator_noop_when_ankimcp_absent(logs):
     prov = make_addon_provisioner(logs)
-    mgr = FakeAddonManager({})  # AnkiMCP not installed → getConfig returns None
+    # A sibling add-on is installed, but none declares the AnkiMCP package.
+    mgr = FakeAddonManager(
+        configs={"some_other_addon": {"foo": 1}},
+        packages={"some_other_addon": "com.example.other"},
+    )
 
     assert prov.hide_ankimcp_indicator(mgr) is False
     assert mgr.writes == []
+    # the silence that hid this bug for a release is now a greppable warning
+    assert any("CI_BUDDY_ADDON_PACKAGE_NOT_FOUND" in l for l in logs)
 
 
 def test_hide_indicator_noop_when_no_manager(logs):
     prov = make_addon_provisioner(logs)
     assert prov.hide_ankimcp_indicator(None) is False
+
+
+def test_installed_addon_packages_reads_manifest_and_is_defensive(tmp_path):
+    # dir 'ankimcp' has a good manifest (package differs from dir); dir 'broken'
+    # has malformed JSON; dir 'nomanifest' has none; dir 'listmanifest' is a JSON
+    # array (no .get). All defensive cases must yield package None, never raise.
+    from ci_buddy.provisioning import _installed_addon_packages
+
+    (tmp_path / "ankimcp").mkdir()
+    (tmp_path / "ankimcp" / "manifest.json").write_text(
+        json.dumps({"name": "AnkiMCP", "package": "anki_mcp_server"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "manifest.json").write_text("{ not json", encoding="utf-8")
+    (tmp_path / "nomanifest").mkdir()
+    (tmp_path / "listmanifest").mkdir()
+    (tmp_path / "listmanifest" / "manifest.json").write_text("[]", encoding="utf-8")
+
+    mgr = types.SimpleNamespace(
+        allAddons=lambda: ["ankimcp", "broken", "nomanifest", "listmanifest"],
+        addonsFolder=lambda module=None: (
+            str(tmp_path) if module is None else str(tmp_path / module)
+        ),
+    )
+
+    pairs = dict(_installed_addon_packages(mgr))
+    assert pairs["ankimcp"] == "anki_mcp_server"
+    assert pairs["broken"] is None
+    assert pairs["nomanifest"] is None
+    assert pairs["listmanifest"] is None
+
+
+def test_installed_addon_packages_empty_when_no_enumeration_api():
+    from ci_buddy.provisioning import _installed_addon_packages
+
+    # a manager without allAddons/addonsFolder → empty (fail-open, no crash)
+    assert _installed_addon_packages(types.SimpleNamespace()) == []
 
 
 def test_hide_indicator_uses_original_writeconfig_through_shim(logs):
@@ -595,12 +689,10 @@ def test_hide_indicator_uses_original_writeconfig_through_shim(logs):
     dropping_shim._ci_buddy_shim = True
     setattr(dropping_shim, core.ORIGINAL_WRITE_CONFIG_ATTR, real_write_config)
 
-    mgr = types.SimpleNamespace(
-        getConfig=lambda module: {"show_toolbar_indicator": True}
-        if module == core.ANKIMCP_PACKAGE
-        else None,
-        writeConfig=dropping_shim,
-    )
+    # Real enumeration API (allAddons/addonsFolder/getConfig) via FakeAddonManager,
+    # but writeConfig swapped for the Seam-4 dropping shim.
+    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+    mgr.writeConfig = dropping_shim
 
     prov = make_addon_provisioner(logs)
     assert prov.hide_ankimcp_indicator(mgr) is True

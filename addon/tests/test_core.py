@@ -225,3 +225,71 @@ def test_plan_hide_ankimcp_writes_when_key_missing():
     plan = core.plan_hide_ankimcp_indicator({"port": 8765})
     assert plan is not None
     assert plan["show_toolbar_indicator"] is False
+
+
+# --- resolve add-on directory by manifest package ------------------------ #
+
+
+def test_resolve_dir_matches_when_dir_differs_from_package():
+    # THE BUG: hosted image dir 'ankimcp' but manifest package 'anki_mcp_server'.
+    installed = [
+        ("other", "com.example.other"),
+        ("ankimcp", "anki_mcp_server"),
+    ]
+    logs: list[str] = []
+    assert (
+        core.resolve_addon_dir_by_package(
+            installed, "anki_mcp_server", logs.append
+        )
+        == "ankimcp"
+    )
+    assert logs == []  # clean match → no warning
+
+
+def test_resolve_dir_exact_dir_equals_package():
+    # dev/source install: directory name == manifest package.
+    installed = [("anki_mcp_server", "anki_mcp_server")]
+    assert (
+        core.resolve_addon_dir_by_package(installed, "anki_mcp_server")
+        == "anki_mcp_server"
+    )
+
+
+def test_resolve_dir_no_match_returns_none_and_warns():
+    installed = [("foo", "foo"), ("bar", None)]  # None never matches
+    logs: list[str] = []
+    assert (
+        core.resolve_addon_dir_by_package(
+            installed, "anki_mcp_server", logs.append
+        )
+        is None
+    )
+    assert len(logs) == 1
+    assert "CI_BUDDY_ADDON_PACKAGE_NOT_FOUND" in logs[0]
+    assert "anki_mcp_server" in logs[0]  # names the package it looked for
+
+
+def test_resolve_dir_empty_input_warns():
+    logs: list[str] = []
+    assert (
+        core.resolve_addon_dir_by_package([], "anki_mcp_server", logs.append)
+        is None
+    )
+    assert any("CI_BUDDY_ADDON_PACKAGE_NOT_FOUND" in l for l in logs)
+
+
+def test_resolve_dir_multiple_matches_takes_first_and_logs():
+    installed = [
+        ("ankimcp", "anki_mcp_server"),
+        ("anki_mcp_server", "anki_mcp_server"),
+    ]
+    logs: list[str] = []
+    assert (
+        core.resolve_addon_dir_by_package(
+            installed, "anki_mcp_server", logs.append
+        )
+        == "ankimcp"  # first in iteration order
+    )
+    assert len(logs) == 1
+    assert "multiple add-ons" in logs[0]
+    assert "ankimcp" in logs[0]

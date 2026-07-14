@@ -20,6 +20,7 @@ engines can be imported and unit-tested without a running Anki.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Callable, Optional, Protocol
 
@@ -355,13 +356,57 @@ def _real_write_config(manager: Any) -> Callable[..., Any] | None:
     return getattr(write_config, core.ORIGINAL_WRITE_CONFIG_ATTR, write_config)
 
 
+def _installed_addon_packages(manager: Any) -> list[tuple[str, str | None]]:
+    """Return ``(dir_name, manifest_package)`` for every installed add-on.
+
+    Enumerates ``manager.allAddons()`` — aqt's long-stable lister that returns
+    installed add-on *directory* names — and reads each add-on's on-disk
+    ``manifest.json`` for its declared ``package``. That manifest field is the
+    only place the package survives: Anki's ``meta.json`` (``addonMeta``) stores
+    the human ``name`` (``provided_name``) but NOT ``package``, so it cannot be
+    used to recover it.
+
+    Defensive by design: an add-on whose manifest is absent, unreadable, not an
+    object, or lacks a string ``package`` contributes ``None`` (it simply never
+    matches). Never raises — the caller (``hide_ankimcp_indicator``) is itself
+    ``_safe``-wrapped, but this keeps a single malformed sibling from hiding the
+    others.
+    """
+    all_addons = getattr(manager, "allAddons", None)
+    addons_folder = getattr(manager, "addonsFolder", None)
+    if all_addons is None or addons_folder is None:
+        return []
+    pairs: list[tuple[str, str | None]] = []
+    for dir_name in all_addons():
+        package: str | None = None
+        try:
+            manifest_path = os.path.join(addons_folder(dir_name), "manifest.json")
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            pkg = manifest.get("package")
+            if isinstance(pkg, str):
+                package = pkg
+        except (OSError, ValueError, AttributeError):
+            package = None
+        pairs.append((dir_name, package))
+    return pairs
+
+
 class AddonConfigProvisioner:
     """Coerce a *sibling* add-on's config in the managed environment.
 
     Currently this hides the AnkiMCP top-toolbar indicator: the AnkiMCP server
-    add-on (``anki_mcp_server``) ships ``show_toolbar_indicator=true``, which
-    draws a persistent "[• AnkiMCP]" button in Anki's top toolbar. On the hosted
-    appliance that surface is unwanted, so ci-buddy forces the key false.
+    add-on (manifest ``package = anki_mcp_server``) ships
+    ``show_toolbar_indicator=true``, which draws a persistent "[• AnkiMCP]"
+    button in Anki's top toolbar. On the hosted appliance that surface is
+    unwanted, so ci-buddy forces the key false.
+
+    The sibling is addressed by resolving its install *directory* from the
+    manifest ``package`` (``_installed_addon_packages`` +
+    ``core.resolve_addon_dir_by_package``) — NOT by assuming the directory name
+    equals the package. On the hosted image the directory is ``ankimcp`` while
+    the manifest package stays ``anki_mcp_server``; the old assumption made
+    ``getConfig``/``writeConfig`` (which key on the directory) silently no-op.
 
     Unlike the other provisioners this runs at ADD-ON LOAD time, NOT on a
     gui_hook. AnkiMCP reads ``show_toolbar_indicator`` exactly once, inside its
@@ -386,12 +431,18 @@ class AddonConfigProvisioner:
         self._print = printer
 
     def hide_ankimcp_indicator(self, manager: Any) -> bool:
-        """Force ``anki_mcp_server``'s ``show_toolbar_indicator`` false via
-        ``manager`` (an ``addonManager``). Returns True iff it wrote a change.
+        """Force AnkiMCP's ``show_toolbar_indicator`` false via ``manager`` (an
+        ``addonManager``). Returns True iff it wrote a change.
 
-        No-op (False) when: no manager, AnkiMCP isn't installed / has no config,
-        or the flag is already false. Fail-open — the caller wraps this in
-        ``_safe`` so a broken/absent AnkiMCP can never crash startup.
+        Resolves AnkiMCP's install *directory* by matching its manifest
+        ``package`` (``core.ANKIMCP_PACKAGE``) across installed add-ons, then
+        keys ``getConfig``/``writeConfig`` on that directory — so it works on the
+        hosted image where the directory (``ankimcp``) differs from the package.
+
+        No-op (False) when: no manager, no add-on declares the package (the
+        resolver logs a distinctive warning), AnkiMCP has no config, or the flag
+        is already false. Fail-open — the caller wraps this in ``_safe`` so a
+        broken/absent AnkiMCP can never crash startup.
         """
         if manager is None:
             return False
@@ -399,18 +450,25 @@ class AddonConfigProvisioner:
         if get_config is None:
             return False
 
-        current = get_config(core.ANKIMCP_PACKAGE)
+        module = core.resolve_addon_dir_by_package(
+            _installed_addon_packages(manager), core.ANKIMCP_PACKAGE, self._print
+        )
+        if module is None:
+            return False  # AnkiMCP not found — resolver already warned (fail-open)
+
+        current = get_config(module)
         new_config = core.plan_hide_ankimcp_indicator(current)
         if new_config is None:
-            return False  # not installed / no config / already hidden
+            return False  # no config / already hidden
 
         write_config = _real_write_config(manager)
         if write_config is None:
             return False
-        write_config(core.ANKIMCP_PACKAGE, new_config)
+        write_config(module, new_config)
         self._print(
             "[ci_buddy] hid AnkiMCP toolbar indicator "
-            "(forced anki_mcp_server show_toolbar_indicator=false)"
+            f"(forced dir {module!r} [package {core.ANKIMCP_PACKAGE}] "
+            "show_toolbar_indicator=false)"
         )
         return True
 

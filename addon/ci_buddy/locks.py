@@ -363,6 +363,73 @@ def disable_automatic_update_checks() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seam 8 (config-gated) — sanitize About's "Copy Debug Info"
+# --------------------------------------------------------------------------- #
+
+#: Originals of the ``aqt.about`` symbols Seam 8 rebinds, keyed by symbol name
+#: (so the sanitizing is reversible/testable and the originals are never lost).
+#: Populated by ``sanitize_about_debug_info``; mirrors ``_original_write_config``.
+_original_about_debug_symbols: dict[str, Callable[..., Any]] = {}
+
+
+def sanitize_about_debug_info() -> None:
+    """Rebind the debug-info sources inside ``aqt.about`` so the About dialog's
+    "Copy Debug Info" button copies a harmless placeholder instead of the real
+    ``supportText()`` + installed-add-on list (an environment-data leak in the
+    managed deployment). The dialog itself — credits, AGPL notice, the button —
+    stays completely stock; only the copied *text* changes.
+
+    INTERCEPTION (verified against the 26.05 source, ``qt/aqt/about.py``):
+    ``about.show`` builds the dialog fresh on every open, and its ``on_copy``
+    closure calls ``supportText()`` / ``addon_debug_info()`` — names ``show``
+    never binds locally, so Python resolves them as *module globals of
+    ``aqt.about``* at CLICK time. Rebinding those two attributes therefore
+    changes what lands on the clipboard without touching the dialog, buttons or
+    signals — and it works identically however About is opened. (The obvious
+    alternative — wrapping ``aqt.about.show`` — has a trap: Help > About goes
+    ``mw.onAbout`` → ``aqt.dialogs.open("About", mw)``, and the DialogManager
+    ``_dialogs`` registry stores a DIRECT reference to ``about.show`` captured
+    at import time, so rebinding the module attribute alone would never
+    intercept the menu path. Sanitizing the *data sources* sidesteps that
+    registry-reference problem entirely: registry opens and direct
+    ``aqt.about.show(mw)`` calls run the same module code.)
+
+    Scoped to About only: ``aqt.errors`` (error reports) resolves ``supportText``
+    through its OWN binding imported from ``aqt.utils`` and *defines*
+    ``addon_debug_info`` itself, so real debug text still reaches error reports
+    — verified against ``qt/aqt/errors.py``.
+
+    Idempotent (re-runs skip already-sanitized symbols) and fail-open: a
+    missing/renamed/reshaped symbol on any Anki version is skipped with a
+    logged warning — About keeps working and the button then copies the real
+    text rather than anything crashing. The stand-ins are constant-returning
+    functions, so no exception can escape into Anki's click path.
+    """
+    import aqt.about
+
+    for symbol, replacement_text in core.ABOUT_DEBUG_INFO_PATCHES.items():
+        existing = getattr(aqt.about, symbol, None)
+        if not callable(existing):
+            print(
+                f"[ci_buddy] warning: aqt.about.{symbol} not present or not "
+                "callable on this Anki version (debug-info sanitizing skipped "
+                "for it)"
+            )
+            continue
+        if getattr(existing, _CI_BUDDY_SHIM_ATTR, False):
+            continue  # already sanitized
+
+        _original_about_debug_symbols[symbol] = existing
+
+        def _sanitized(*_a: Any, _text: str = replacement_text, **_k: Any) -> str:
+            # Constant text, whatever the caller passed — cannot raise.
+            return _text
+
+        setattr(_sanitized, _CI_BUDDY_SHIM_ATTR, True)
+        setattr(aqt.about, symbol, _sanitized)
+
+
+# --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
 
@@ -413,6 +480,15 @@ def register(config: dict[str, Any]) -> None:
         gui_hooks.main_window_did_init.append(
             _safe(disable_debug_console_shortcut)
         )
+
+    # Seam 8: sanitize About's "Copy Debug Info" (supportText + add-on list
+    # leak environment data in the managed deployment; the dialog itself stays
+    # visible — credits/AGPL fairness). Applied NOW (at add-on load), not on a
+    # hook: aqt.about is already imported by aqt/__init__ before add-ons load,
+    # there is no gui_hook for the About dialog, and the rebinding must be in
+    # place before the first click.
+    if config.get("sanitize_copy_debug_info", True):
+        _safe(sanitize_about_debug_info)()
 
     # Seam 5: sync surfaces (config-gated; conservative defaults).
     if config.get("strip_sync_link", False):

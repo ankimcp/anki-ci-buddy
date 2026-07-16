@@ -45,6 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lock_database_check": False,
     "lock_file_menu": True,
     "lock_debug_console": True,
+    "sanitize_copy_debug_info": True,
     "disable_update_checks": True,
     "strip_sync_link": False,
     "provisioning_enabled": False,
@@ -101,6 +102,25 @@ UPDATE_CHECK_SETTERS: tuple[str, ...] = (
     "set_update_check",
     "set_check_for_addon_updates",
 )
+
+#: The harmless text that About's "Copy Debug Info" button puts on the
+#: clipboard when ``sanitize_copy_debug_info`` is on. Deliberately explains
+#: itself, so a support thread that receives it reads as intentional.
+DEBUG_INFO_PLACEHOLDER = "Debug info is disabled in this managed environment."
+
+#: Maps each ``aqt.about`` module global that the About dialog's *Copy Debug
+#: Info* click handler resolves at CLICK time → the constant string the
+#: sanitized stand-in returns instead (Seam 8). ``supportText`` (imported into
+#: ``aqt.about`` from ``aqt.utils``) carries OS/version/paths/driver details
+#: and is the body of the copied text, so it becomes the placeholder;
+#: ``addon_debug_info`` (imported from ``aqt.errors``) is the installed add-on
+#: list, *appended* to the body — its replacement is the empty string so the
+#: placeholder is not duplicated. Verified against the 26.05 source
+#: (``qt/aqt/about.py`` lines 10/12/36-42).
+ABOUT_DEBUG_INFO_PATCHES: dict[str, str] = {
+    "supportText": DEBUG_INFO_PLACEHOLDER,
+    "addon_debug_info": "",
+}
 
 #: Maps a boolean config key to the exact ``aqt.DialogManager`` registry name
 #: that Seam 2 disables when that key is set. EXACT match only — an over-broad

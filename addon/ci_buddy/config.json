@@ -13,6 +13,7 @@
   "lock_database_check": false,
   "lock_file_menu": true,
   "lock_debug_console": true,
+  "sanitize_copy_debug_info": true,
   "disable_update_checks": true,
   "strip_sync_link": false,
   "provisioning_enabled": false,

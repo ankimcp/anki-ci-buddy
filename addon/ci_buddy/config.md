@@ -56,6 +56,12 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 |---|---|---|
 | `disable_update_checks` | `true` | Forces the **global** automatic update checks off via `mw.pm`: `set_update_check(False)` suppresses the startup "a new version of Anki is available" prompt, and `set_check_for_addon_updates(False)` suppresses the 24h-throttled add-on update fetch. Both flags live in `pm.meta` (`prefs21.db`, global — not per-profile). Applied at **add-on load time** every launch — the automatic checks fire inside `loadProfile`, *before* `main_window_did_init`, so a hook-time force would be too late; and re-forcing each launch means a value re-enabled via Preferences only survives until the next boot. `set_check_for_addon_updates` only exists on Anki **26.05+**: on ≤ 25.09 only the app-update prompt is suppressed — the add-on-update check has no `pm` gate there and stays active — and the missing setter is skipped with a logged warning each boot, never a crash. |
 
+## About dialog debug info (Part A, Seam 8)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sanitize_copy_debug_info` | `true` | Help → About stays fully visible and stock (credits, AGPL notice, and the **Copy Debug Info** button all remain), but clicking the button copies the harmless placeholder `"Debug info is disabled in this managed environment."` (plus a trailing newline when any add-on config is dirty — effectively always on the hosted image) instead of the real `supportText()` output + installed add-on list — environment data that would otherwise leak from the managed deployment. Mechanism: rebinds the `supportText` / `addon_debug_info` module globals **inside `aqt.about`** — the names the button's click handler resolves at click time — so it works however About is opened (Help menu via the dialog-manager registry, or a direct `aqt.about.show(mw)` call). Scoped to About only: error reports (`aqt.errors`) resolve their own `supportText` binding and keep the real text. Fail-open: a missing/renamed symbol on any Anki version is skipped with a logged warning — About keeps working and the button then copies the real debug info, never a crash. |
+
 ## Sync surfaces (Part A, Seam 5)
 
 | Key | Default | Meaning |

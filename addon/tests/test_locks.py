@@ -86,10 +86,12 @@ def make_form_with_all_lock_targets():
 
 @pytest.fixture(autouse=True)
 def _reset_shim_ref():
-    # Keep the module-level original-ref clean between tests.
+    # Keep the module-level original-refs clean between tests.
     locks._original_write_config = None
+    locks._original_about_debug_symbols.clear()
     yield
     locks._original_write_config = None
+    locks._original_about_debug_symbols.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -477,6 +479,122 @@ def test_disable_automatic_update_checks_no_pm_warns_not_crashes(
 
 
 # --------------------------------------------------------------------------- #
+# Seam 8 — sanitize About's "Copy Debug Info"
+# --------------------------------------------------------------------------- #
+
+_REAL_SUPPORT_TEXT = "Anki 26.05 Python 3.9 Qt 6.6 /home/user/.local/share/Anki2"
+_REAL_ADDON_INFO = "Add-ons possibly involved: ankimcp"
+
+
+def _install_fake_aqt_about(monkeypatch, *, with_addon_info=True):
+    """Install fake ``aqt`` + ``aqt.about`` submodules so
+    ``sanitize_about_debug_info`` (which does ``import aqt.about``) resolves
+    against them. Mirrors the real layout: ``aqt.about`` holds its OWN bindings
+    of ``supportText``/``addon_debug_info`` (imported at its top from
+    ``aqt.utils``/``aqt.errors``)."""
+    about_mod = types.ModuleType("aqt.about")
+    about_mod.supportText = lambda: _REAL_SUPPORT_TEXT
+    if with_addon_info:
+        about_mod.addon_debug_info = lambda: _REAL_ADDON_INFO
+
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.about = about_mod
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+    monkeypatch.setitem(sys.modules, "aqt.about", about_mod)
+    return about_mod
+
+
+def _on_copy_text(about_mod, addons_dirty=True):
+    """Reproduce what ``about.py``'s ``on_copy`` puts on the clipboard: it
+    resolves ``supportText``/``addon_debug_info`` as *module globals of
+    aqt.about* at click time (the whole point of the Seam 8 rebinding)."""
+    txt = about_mod.supportText()
+    if addons_dirty:
+        txt += "\n" + about_mod.addon_debug_info()
+    return txt
+
+
+def test_sanitize_about_debug_info_copies_placeholder(monkeypatch):
+    about_mod = _install_fake_aqt_about(monkeypatch)
+
+    locks.sanitize_about_debug_info()
+
+    # What the button now puts on the clipboard: placeholder body, empty
+    # add-on suffix — no environment data.
+    assert _on_copy_text(about_mod) == core.DEBUG_INFO_PLACEHOLDER + "\n"
+    assert _on_copy_text(about_mod, addons_dirty=False) == core.DEBUG_INFO_PLACEHOLDER
+    for leak in (_REAL_SUPPORT_TEXT, _REAL_ADDON_INFO):
+        assert leak not in _on_copy_text(about_mod)
+
+    # The originals are preserved (reversible/testable) and still functional —
+    # e.g. aqt.errors keeps real debug text through its own bindings.
+    originals = locks._original_about_debug_symbols
+    assert originals["supportText"]() == _REAL_SUPPORT_TEXT
+    assert originals["addon_debug_info"]() == _REAL_ADDON_INFO
+
+
+def test_sanitize_about_debug_info_is_idempotent(monkeypatch):
+    about_mod = _install_fake_aqt_about(monkeypatch)
+
+    locks.sanitize_about_debug_info()
+    shim = about_mod.supportText
+    assert getattr(shim, locks._CI_BUDDY_SHIM_ATTR, False)
+
+    # Second run must not wrap the shim again — same objects survive, and the
+    # stashed originals are not clobbered with the shims themselves.
+    locks.sanitize_about_debug_info()
+    assert about_mod.supportText is shim
+    assert (
+        locks._original_about_debug_symbols["supportText"]()
+        == _REAL_SUPPORT_TEXT
+    )
+
+
+def test_sanitize_about_debug_info_missing_symbol_warns(monkeypatch, capsys):
+    # An aqt build without addon_debug_info: the other symbol is still
+    # sanitized, the missing one is a logged skip — never an AttributeError.
+    about_mod = _install_fake_aqt_about(monkeypatch, with_addon_info=False)
+
+    locks.sanitize_about_debug_info()
+
+    assert about_mod.supportText() == core.DEBUG_INFO_PLACEHOLDER
+    out = capsys.readouterr().out
+    assert "addon_debug_info" in out
+    assert "sanitizing skipped" in out
+
+
+def test_sanitize_about_debug_info_reshaped_symbol_warns(monkeypatch, capsys):
+    # A symbol that exists but is no longer callable is a logged skip too —
+    # and per-item: the other symbol is still sanitized.
+    about_mod = _install_fake_aqt_about(monkeypatch)
+    about_mod.supportText = "no longer a function"
+
+    locks.sanitize_about_debug_info()
+
+    out = capsys.readouterr().out
+    assert "supportText" in out
+    assert "sanitizing skipped" in out
+    assert about_mod.supportText == "no longer a function"  # left untouched
+    assert about_mod.addon_debug_info() == ""  # other symbol still sanitized
+
+
+def test_sanitize_about_debug_info_missing_aqt_about_fails_open(
+    monkeypatch, capsys
+):
+    # No aqt.about module at all (radically reshaped aqt): the _safe-wrapped
+    # register path logs the failure and moves on — never a crash, and the
+    # stock About (with real debug info) keeps working.
+    aqt_mod = types.ModuleType("aqt")  # no ``about`` submodule, no __path__
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+    monkeypatch.delitem(sys.modules, "aqt.about", raising=False)
+
+    locks._safe(locks.sanitize_about_debug_info)()  # must not raise
+
+    out = capsys.readouterr().out
+    assert "sanitize_about_debug_info failed" in out
+
+
+# --------------------------------------------------------------------------- #
 # register — Seam 7 gating and load-time application
 # --------------------------------------------------------------------------- #
 
@@ -508,7 +626,11 @@ def _install_fake_aqt_for_register(monkeypatch, pm):
 
 #: Gates off the register seams that would need extra fake modules, leaving the
 #: Seam 7 behaviour under test isolated.
-_REGISTER_BASE = {"lock_addon_config_writes": False, "lock_debug_console": False}
+_REGISTER_BASE = {
+    "lock_addon_config_writes": False,
+    "lock_debug_console": False,
+    "sanitize_copy_debug_info": False,
+}
 
 
 def test_register_suppresses_update_checks_at_load_time(monkeypatch):
@@ -533,3 +655,38 @@ def test_register_gate_off_leaves_update_checks_alone(monkeypatch):
     )
 
     assert pm.calls == []
+
+
+def _add_fake_about_to_register_env(monkeypatch):
+    """Graft a fake ``aqt.about`` onto the register-test fake ``aqt``."""
+    about_mod = types.ModuleType("aqt.about")
+    about_mod.supportText = lambda: _REAL_SUPPORT_TEXT
+    about_mod.addon_debug_info = lambda: _REAL_ADDON_INFO
+    sys.modules["aqt"].about = about_mod
+    monkeypatch.setitem(sys.modules, "aqt.about", about_mod)
+    return about_mod
+
+
+def test_register_sanitizes_about_debug_info_at_load_time(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    about_mod = _add_fake_about_to_register_env(monkeypatch)
+
+    locks.register(
+        core.merge_config(dict(_REGISTER_BASE, sanitize_copy_debug_info=True))
+    )
+
+    # Applied immediately at register (add-on load) time — NOT deferred to a
+    # hook: there is no gui_hook for the About dialog, and the rebinding must
+    # be live before the first Copy Debug Info click.
+    assert _on_copy_text(about_mod) == core.DEBUG_INFO_PLACEHOLDER + "\n"
+
+
+def test_register_gate_off_leaves_about_debug_info_alone(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    about_mod = _add_fake_about_to_register_env(monkeypatch)
+
+    locks.register(core.merge_config(_REGISTER_BASE))
+
+    # Untouched original behaviour: the real debug text is still copied.
+    assert _on_copy_text(about_mod) == _REAL_SUPPORT_TEXT + "\n" + _REAL_ADDON_INFO
+    assert not getattr(about_mod.supportText, locks._CI_BUDDY_SHIM_ATTR, False)

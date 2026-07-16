@@ -52,6 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "disable_native_auto_sync": False,
     "ensure_latex_generation": True,
     "hide_ankimcp_toolbar_indicator": True,
+    "hide_ankimcp_settings_menu_item": True,
 }
 
 #: Known config keys (used to warn about typos / stale keys — never crash).
@@ -292,6 +293,20 @@ ANKIMCP_PACKAGE = "anki_mcp_server"
 #: Anki's top toolbar. ci-buddy forces this false in the managed environment.
 ANKIMCP_TOOLBAR_INDICATOR_KEY = "show_toolbar_indicator"
 
+#: The AnkiMCP config key that adds the "AnkiMCP Server Settings..." entry to
+#: Anki's Tools menu. ci-buddy forces this false in the managed environment.
+ANKIMCP_SETTINGS_MENU_ITEM_KEY = "show_settings_menu_item"
+
+#: Maps each ci-buddy "hide" gate to the AnkiMCP config key it forces false.
+#: The two are independent UI surfaces, each gated separately in ci-buddy's own
+#: config: a gate only forces its AnkiMCP key when that gate is enabled. Single
+#: source of truth for both the planner (``plan_hide_ankimcp_ui``) and the
+#: register-time gating in ``provisioning.register``.
+ANKIMCP_HIDE_KEY_MAP: dict[str, str] = {
+    "hide_ankimcp_toolbar_indicator": ANKIMCP_TOOLBAR_INDICATOR_KEY,
+    "hide_ankimcp_settings_menu_item": ANKIMCP_SETTINGS_MENU_ITEM_KEY,
+}
+
 
 def resolve_addon_dir_by_package(
     installed: Iterable[tuple[str, str | None]],
@@ -334,28 +349,54 @@ def resolve_addon_dir_by_package(
     return matches[0]
 
 
-def plan_hide_ankimcp_indicator(
+def ankimcp_keys_to_force(ci_buddy_config: dict[str, Any]) -> list[str]:
+    """Return the AnkiMCP config keys ci-buddy is configured to force false, in
+    ``ANKIMCP_HIDE_KEY_MAP`` order.
+
+    A key is included iff its ci-buddy gate (``hide_ankimcp_*``) is truthy. The
+    two surfaces are independent, so disabling one gate drops only its key.
+    """
+    return [
+        ankimcp_key
+        for gate, ankimcp_key in ANKIMCP_HIDE_KEY_MAP.items()
+        if bool(ci_buddy_config.get(gate, False))
+    ]
+
+
+def plan_hide_ankimcp_ui(
+    ci_buddy_config: dict[str, Any],
     ankimcp_config: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Decide what (if anything) to write back into AnkiMCP's config to hide its
-    top-toolbar indicator.
+    """Decide what (if anything) to write back into AnkiMCP's config to hide the
+    UI surfaces ci-buddy is configured to force off (toolbar indicator and/or
+    Tools-menu settings item).
 
-    Returns a NEW config dict (a shallow copy with ``show_toolbar_indicator``
-    forced to ``False``) when a durable write is needed, or ``None`` for a safe
-    no-op:
+    For each ci-buddy ``hide_ankimcp_*`` gate that is enabled (see
+    ``ankimcp_keys_to_force``), the mapped AnkiMCP key is forced ``False``.
+    Returns a NEW config dict (a shallow copy of ``ankimcp_config`` with those
+    keys set ``False``) when at least one enabled key isn't already ``False``,
+    or ``None`` for a safe no-op:
 
     - ``ankimcp_config`` is ``None``/empty → AnkiMCP is not installed or exposes
       no config → nothing to do.
-    - the key is already exactly ``False`` → idempotent no-op (same write-only-
-      when-needed spirit as ``CollectionConfigProvisioner.ensure_render_latex``),
-      so ci-buddy never re-writes ``meta.json`` on a subsequent load.
+    - every enabled key is already exactly ``False`` → idempotent no-op (same
+      write-only-when-needed spirit as
+      ``CollectionConfigProvisioner.ensure_render_latex``), so ci-buddy never
+      re-writes ``meta.json`` on a subsequent load.
 
-    Pure/decision-only: the caller performs the actual write.
+    Pure/decision-only: the caller performs the actual write (and can diff the
+    result against ``ankimcp_config`` to learn which keys it forced).
     """
     if not ankimcp_config:
         return None
-    if ankimcp_config.get(ANKIMCP_TOOLBAR_INDICATOR_KEY) is False:
+    needed = [
+        key
+        for key in ankimcp_keys_to_force(ci_buddy_config)
+        if ankimcp_config.get(key) is not False
+    ]
+    if not needed:
         return None
     new_config = dict(ankimcp_config)
-    new_config[ANKIMCP_TOOLBAR_INDICATOR_KEY] = False
+    for key in needed:
+        new_config[key] = False
     return new_config

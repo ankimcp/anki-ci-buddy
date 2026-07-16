@@ -19,5 +19,6 @@
   "clear_key_on_close": true,
   "disable_native_auto_sync": false,
   "ensure_latex_generation": true,
-  "hide_ankimcp_toolbar_indicator": true
+  "hide_ankimcp_toolbar_indicator": true,
+  "hide_ankimcp_settings_menu_item": true
 }

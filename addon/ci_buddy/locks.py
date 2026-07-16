@@ -145,7 +145,7 @@ def install_write_config_shim() -> None:
     _blocked_write_config._ci_buddy_shim = True  # type: ignore[attr-defined]
     # Stash the genuine original ON the shim callable as well as in the module
     # global. This is the decoupled contract provisioning.py relies on: it must
-    # durably write ANOTHER add-on's config (AnkiMCP's show_toolbar_indicator)
+    # durably write ANOTHER add-on's config (AnkiMCP's UI config keys)
     # even after this shim is in place, and it recovers the real writeConfig via
     # this attribute WITHOUT importing locks (the two modules stay decoupled).
     # The attribute name lives in core.ORIGINAL_WRITE_CONFIG_ATTR — the single

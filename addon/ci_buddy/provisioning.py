@@ -368,7 +368,7 @@ def _installed_addon_packages(manager: Any) -> list[tuple[str, str | None]]:
 
     Defensive by design: an add-on whose manifest is absent, unreadable, not an
     object, or lacks a string ``package`` contributes ``None`` (it simply never
-    matches). Never raises — the caller (``hide_ankimcp_indicator``) is itself
+    matches). Never raises — the caller (``hide_ankimcp_ui``) is itself
     ``_safe``-wrapped, but this keeps a single malformed sibling from hiding the
     others.
     """
@@ -395,11 +395,15 @@ def _installed_addon_packages(manager: Any) -> list[tuple[str, str | None]]:
 class AddonConfigProvisioner:
     """Coerce a *sibling* add-on's config in the managed environment.
 
-    Currently this hides the AnkiMCP top-toolbar indicator: the AnkiMCP server
-    add-on (manifest ``package = anki_mcp_server``) ships
-    ``show_toolbar_indicator=true``, which draws a persistent "[• AnkiMCP]"
-    button in Anki's top toolbar. On the hosted appliance that surface is
-    unwanted, so ci-buddy forces the key false.
+    Currently this hides AnkiMCP's user-facing UI surfaces: the AnkiMCP server
+    add-on (manifest ``package = anki_mcp_server``) ships, defaulted true, both a
+    persistent "[• AnkiMCP]" toolbar button (``show_toolbar_indicator``) and an
+    "AnkiMCP Server Settings..." entry in Anki's Tools menu
+    (``show_settings_menu_item``). On the hosted appliance those surfaces are
+    unwanted, so ci-buddy forces the corresponding keys false — each gated
+    independently by its own ci-buddy ``hide_ankimcp_*`` flag
+    (``core.ANKIMCP_HIDE_KEY_MAP``). Both keys are written in ONE getConfig /
+    writeConfig round-trip.
 
     The sibling is addressed by resolving its install *directory* from the
     manifest ``package`` (``_installed_addon_packages`` +
@@ -409,17 +413,17 @@ class AddonConfigProvisioner:
     ``getConfig``/``writeConfig`` (which key on the directory) silently no-op.
 
     Unlike the other provisioners this runs at ADD-ON LOAD time, NOT on a
-    gui_hook. AnkiMCP reads ``show_toolbar_indicator`` exactly once, inside its
+    gui_hook. AnkiMCP reads both keys exactly once, inside its
     ``main_window_did_init`` handler (``_setup_menu``), and aqt fires that hook
-    only after every add-on has finished importing. ci-buddy writes the value
-    during its own import — strictly before that hook — so the indicator is
+    only after every add-on has finished importing. ci-buddy writes the values
+    during its own import — strictly before that hook — so the surfaces are
     hidden the SAME session, not merely next launch. (Registering the write on
     ci-buddy's own ``main_window_did_init`` would be too late: AnkiMCP loads
     first alphabetically, so its handler runs before ours.)
 
     The write goes through ``_real_write_config`` so it survives Seam 4's
-    write-dropping shim; if AnkiMCP isn't installed or the key is already false,
-    it is a safe no-op (see ``core.plan_hide_ankimcp_indicator``).
+    write-dropping shim; if AnkiMCP isn't installed or every gated key is already
+    false, it is a safe no-op (see ``core.plan_hide_ankimcp_ui``).
     """
 
     def __init__(
@@ -430,9 +434,10 @@ class AddonConfigProvisioner:
         self._config = config
         self._print = printer
 
-    def hide_ankimcp_indicator(self, manager: Any) -> bool:
-        """Force AnkiMCP's ``show_toolbar_indicator`` false via ``manager`` (an
-        ``addonManager``). Returns True iff it wrote a change.
+    def hide_ankimcp_ui(self, manager: Any) -> bool:
+        """Force the ci-buddy-gated AnkiMCP UI keys false via ``manager`` (an
+        ``addonManager``), in a single getConfig/writeConfig pass. Returns True
+        iff it wrote a change.
 
         Resolves AnkiMCP's install *directory* by matching its manifest
         ``package`` (``core.ANKIMCP_PACKAGE``) across installed add-ons, then
@@ -440,9 +445,9 @@ class AddonConfigProvisioner:
         hosted image where the directory (``ankimcp``) differs from the package.
 
         No-op (False) when: no manager, no add-on declares the package (the
-        resolver logs a distinctive warning), AnkiMCP has no config, or the flag
-        is already false. Fail-open — the caller wraps this in ``_safe`` so a
-        broken/absent AnkiMCP can never crash startup.
+        resolver logs a distinctive warning), AnkiMCP has no config, or every
+        gated key is already false. Fail-open — the caller wraps this in
+        ``_safe`` so a broken/absent AnkiMCP can never crash startup.
         """
         if manager is None:
             return False
@@ -457,18 +462,21 @@ class AddonConfigProvisioner:
             return False  # AnkiMCP not found — resolver already warned (fail-open)
 
         current = get_config(module)
-        new_config = core.plan_hide_ankimcp_indicator(current)
+        new_config = core.plan_hide_ankimcp_ui(self._config, current)
         if new_config is None:
-            return False  # no config / already hidden
+            return False  # no config / every gated key already false
 
         write_config = _real_write_config(manager)
         if write_config is None:
             return False
         write_config(module, new_config)
+        # The plan only touches the gated AnkiMCP keys, so a diff against the
+        # pre-write config is exactly the set it forced — report it for the log.
+        forced = sorted(k for k, v in new_config.items() if current.get(k) is not v)
         self._print(
-            "[ci_buddy] hid AnkiMCP toolbar indicator "
+            "[ci_buddy] hid AnkiMCP UI "
             f"(forced dir {module!r} [package {core.ANKIMCP_PACKAGE}] "
-            "show_toolbar_indicator=false)"
+            f"{', '.join(f'{k}=false' for k in forced)})"
         )
         return True
 
@@ -480,7 +488,7 @@ class AddonConfigProvisioner:
 
     def on_register(self) -> None:
         """Apply the coercion once, at add-on load time."""
-        self.hide_ankimcp_indicator(self._current_manager())
+        self.hide_ankimcp_ui(self._current_manager())
 
 
 def register(config: dict[str, Any]) -> SyncProvisioner:
@@ -489,19 +497,23 @@ def register(config: dict[str, Any]) -> SyncProvisioner:
 
     The provisioners are independently config-gated: credential injection on
     ``provisioning_enabled``, LaTeX enforcement on ``ensure_latex_generation``,
-    and the AnkiMCP toolbar-indicator hide on ``hide_ankimcp_toolbar_indicator``.
+    and the AnkiMCP UI hide on the ``hide_ankimcp_*`` gates
+    (``core.ANKIMCP_HIDE_KEY_MAP``) — the coercion runs if *any* gate is on, and
+    forces only the enabled keys in one write.
     """
     provisioner = SyncProvisioner(config)
     latex_provisioner = CollectionConfigProvisioner(config)
 
     provisioning_on = config.get("provisioning_enabled", False)
     latex_on = config.get("ensure_latex_generation", True)
-    hide_indicator_on = config.get("hide_ankimcp_toolbar_indicator", True)
+    hide_ankimcp_ui_on = any(
+        config.get(gate, False) for gate in core.ANKIMCP_HIDE_KEY_MAP
+    )
 
     # Sibling-add-on coercion runs NOW (at load), not on a hook — it must land
-    # before AnkiMCP reads the flag at main_window_did_init. See
+    # before AnkiMCP reads the flags at main_window_did_init. See
     # AddonConfigProvisioner for the same-session-vs-next-launch reasoning.
-    if hide_indicator_on:
+    if hide_ankimcp_ui_on:
         _safe(AddonConfigProvisioner(config).on_register)()
 
     if not provisioning_on and not latex_on:

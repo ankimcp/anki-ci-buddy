@@ -196,35 +196,113 @@ def test_sync_link_detection():
     assert core.is_sync_toolbar_link(spinner_only) is False
 
 
-# --- hide AnkiMCP toolbar indicator (plan) ------------------------------- #
+# --- hide AnkiMCP UI (plan) ---------------------------------------------- #
+
+# Config with BOTH ci-buddy hide gates enabled (the shipped default).
+_BOTH_GATES = {
+    "hide_ankimcp_toolbar_indicator": True,
+    "hide_ankimcp_settings_menu_item": True,
+}
 
 
-def test_plan_hide_ankimcp_flips_true_to_false():
-    current = {"show_toolbar_indicator": True, "port": 8765}
-    plan = core.plan_hide_ankimcp_indicator(current)
+def test_ankimcp_keys_to_force_maps_gates_to_keys():
+    assert core.ankimcp_keys_to_force(core.merge_config(_BOTH_GATES)) == [
+        "show_toolbar_indicator",
+        "show_settings_menu_item",
+    ]
+
+
+def test_ankimcp_keys_to_force_drops_disabled_gate():
+    cfg = core.merge_config(
+        {
+            "hide_ankimcp_toolbar_indicator": True,
+            "hide_ankimcp_settings_menu_item": False,
+        }
+    )
+    assert core.ankimcp_keys_to_force(cfg) == ["show_toolbar_indicator"]
+
+
+def test_ankimcp_keys_to_force_empty_when_all_gates_off():
+    cfg = core.merge_config(
+        {
+            "hide_ankimcp_toolbar_indicator": False,
+            "hide_ankimcp_settings_menu_item": False,
+        }
+    )
+    assert core.ankimcp_keys_to_force(cfg) == []
+
+
+def test_plan_hide_ankimcp_forces_both_keys():
+    current = {
+        "show_toolbar_indicator": True,
+        "show_settings_menu_item": True,
+        "port": 8765,
+    }
+    plan = core.plan_hide_ankimcp_ui(core.merge_config(_BOTH_GATES), current)
     assert plan is not None
     assert plan["show_toolbar_indicator"] is False
+    assert plan["show_settings_menu_item"] is False
     # other keys preserved, and the input dict is not mutated
     assert plan["port"] == 8765
     assert current["show_toolbar_indicator"] is True
+    assert current["show_settings_menu_item"] is True
 
 
-def test_plan_hide_ankimcp_idempotent_when_already_false():
-    # already hidden → no-op, so we never re-dirty AnkiMCP's meta.json
-    assert core.plan_hide_ankimcp_indicator({"show_toolbar_indicator": False}) is None
+def test_plan_hide_ankimcp_forces_only_the_still_needed_key():
+    # one gated key already false, the other true → write only flips the true one
+    current = {"show_toolbar_indicator": False, "show_settings_menu_item": True}
+    plan = core.plan_hide_ankimcp_ui(core.merge_config(_BOTH_GATES), current)
+    assert plan == {
+        "show_toolbar_indicator": False,
+        "show_settings_menu_item": False,
+    }
+
+
+def test_plan_hide_ankimcp_idempotent_when_both_already_false():
+    # both gated keys already hidden → no-op, so we never re-dirty meta.json
+    current = {"show_toolbar_indicator": False, "show_settings_menu_item": False}
+    assert core.plan_hide_ankimcp_ui(core.merge_config(_BOTH_GATES), current) is None
+
+
+def test_plan_hide_ankimcp_only_touches_enabled_gate():
+    # only the toolbar gate enabled → the menu-item key is left untouched even
+    # though it is true (it isn't a surface ci-buddy is configured to hide here)
+    cfg = core.merge_config(
+        {
+            "hide_ankimcp_toolbar_indicator": True,
+            "hide_ankimcp_settings_menu_item": False,
+        }
+    )
+    current = {"show_toolbar_indicator": True, "show_settings_menu_item": True}
+    plan = core.plan_hide_ankimcp_ui(cfg, current)
+    assert plan is not None
+    assert plan["show_toolbar_indicator"] is False
+    assert plan["show_settings_menu_item"] is True  # untouched
+
+
+def test_plan_hide_ankimcp_noop_when_no_gate_enabled():
+    cfg = core.merge_config(
+        {
+            "hide_ankimcp_toolbar_indicator": False,
+            "hide_ankimcp_settings_menu_item": False,
+        }
+    )
+    current = {"show_toolbar_indicator": True, "show_settings_menu_item": True}
+    assert core.plan_hide_ankimcp_ui(cfg, current) is None
 
 
 @pytest.mark.parametrize("current", [None, {}])
 def test_plan_hide_ankimcp_noop_when_absent(current):
     # AnkiMCP not installed / no config → safe no-op
-    assert core.plan_hide_ankimcp_indicator(current) is None
+    assert core.plan_hide_ankimcp_ui(core.merge_config(_BOTH_GATES), current) is None
 
 
-def test_plan_hide_ankimcp_writes_when_key_missing():
-    # key absent (e.g. an old AnkiMCP build) → force it false
-    plan = core.plan_hide_ankimcp_indicator({"port": 8765})
+def test_plan_hide_ankimcp_writes_when_keys_missing():
+    # keys absent (e.g. an old AnkiMCP build) → force them false
+    plan = core.plan_hide_ankimcp_ui(core.merge_config(_BOTH_GATES), {"port": 8765})
     assert plan is not None
     assert plan["show_toolbar_indicator"] is False
+    assert plan["show_settings_menu_item"] is False
 
 
 # --- resolve add-on directory by manifest package ------------------------ #

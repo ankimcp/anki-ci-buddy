@@ -525,7 +525,7 @@ def test_register_skips_latex_hooks_when_flag_off(monkeypatch):
     assert gui_hooks.sync_did_finish.callbacks == []
 
 
-# --- hide AnkiMCP toolbar indicator ------------------------------------- #
+# --- hide AnkiMCP UI ----------------------------------------------------- #
 
 
 class FakeAddonManager:
@@ -582,55 +582,173 @@ def make_addon_provisioner(logs, **overrides):
     return AddonConfigProvisioner(config, printer=logs.append)
 
 
-def test_hide_indicator_flips_true_to_false(logs):
-    prov = make_addon_provisioner(logs)
-    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
-
-    assert prov.hide_ankimcp_indicator(mgr) is True
-    assert mgr.writes == [(core.ANKIMCP_PACKAGE, {"show_toolbar_indicator": False})]
-    assert any("hid AnkiMCP toolbar indicator" in l for l in logs)
-
-
-def test_hide_indicator_idempotent_when_already_false(logs):
-    prov = make_addon_provisioner(logs)
-    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": False}})
-
-    assert prov.hide_ankimcp_indicator(mgr) is False
-    assert mgr.writes == []  # never re-writes an already-hidden indicator
+def _ui_on(**extra):
+    # both hide gates on by default (the shipped default); override per test
+    base = {
+        "hide_ankimcp_toolbar_indicator": True,
+        "hide_ankimcp_settings_menu_item": True,
+    }
+    base.update(extra)
+    return base
 
 
-def test_hide_indicator_resolves_dir_when_it_differs_from_package(logs):
+def test_hide_ui_forces_both_keys_in_one_write(logs):
+    prov = make_addon_provisioner(logs, **_ui_on())
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+                "port": 8765,
+            }
+        }
+    )
+
+    assert prov.hide_ankimcp_ui(mgr) is True
+    # a SINGLE writeConfig with both keys forced false, other keys preserved
+    assert mgr.writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {
+                "show_toolbar_indicator": False,
+                "show_settings_menu_item": False,
+                "port": 8765,
+            },
+        )
+    ]
+    log = next(l for l in logs if "hid AnkiMCP UI" in l)
+    assert "show_toolbar_indicator=false" in log
+    assert "show_settings_menu_item=false" in log
+
+
+def test_hide_ui_forces_only_the_still_needed_key(logs):
+    # toolbar indicator already false; only the menu item needs forcing
+    prov = make_addon_provisioner(logs, **_ui_on())
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": False,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
+
+    assert prov.hide_ankimcp_ui(mgr) is True
+    assert mgr.writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {"show_toolbar_indicator": False, "show_settings_menu_item": False},
+        )
+    ]
+    log = next(l for l in logs if "hid AnkiMCP UI" in l)
+    # log names only the key it actually flipped
+    assert "show_settings_menu_item=false" in log
+    assert "show_toolbar_indicator" not in log
+
+
+def test_hide_ui_idempotent_when_both_already_false(logs):
+    prov = make_addon_provisioner(logs, **_ui_on())
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": False,
+                "show_settings_menu_item": False,
+            }
+        }
+    )
+
+    assert prov.hide_ankimcp_ui(mgr) is False
+    assert mgr.writes == []  # never re-writes an already-hidden UI
+
+
+def test_hide_ui_respects_toolbar_only_gate(logs):
+    # only the toolbar gate on → menu-item key left untouched even though true
+    prov = make_addon_provisioner(
+        logs, **_ui_on(hide_ankimcp_settings_menu_item=False)
+    )
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
+
+    assert prov.hide_ankimcp_ui(mgr) is True
+    assert mgr.writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {"show_toolbar_indicator": False, "show_settings_menu_item": True},
+        )
+    ]
+
+
+def test_hide_ui_respects_menu_item_only_gate(logs):
+    # only the menu-item gate on → toolbar key left untouched even though true
+    prov = make_addon_provisioner(
+        logs, **_ui_on(hide_ankimcp_toolbar_indicator=False)
+    )
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
+
+    assert prov.hide_ankimcp_ui(mgr) is True
+    assert mgr.writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {"show_toolbar_indicator": True, "show_settings_menu_item": False},
+        )
+    ]
+
+
+def test_hide_ui_resolves_dir_when_it_differs_from_package(logs):
     # THE REGRESSION: hosted image installs AnkiMCP under directory 'ankimcp'
     # while its manifest still declares package 'anki_mcp_server'. getConfig/
     # writeConfig are keyed by the DIRECTORY, so the write must target 'ankimcp'.
-    prov = make_addon_provisioner(logs)
+    prov = make_addon_provisioner(logs, **_ui_on())
     mgr = FakeAddonManager(
-        configs={"ankimcp": {"show_toolbar_indicator": True}},
+        configs={
+            "ankimcp": {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        },
         packages={"ankimcp": core.ANKIMCP_PACKAGE},
     )
 
-    assert prov.hide_ankimcp_indicator(mgr) is True
-    assert mgr.writes == [("ankimcp", {"show_toolbar_indicator": False})]
-    assert any("hid AnkiMCP toolbar indicator" in l for l in logs)
+    assert prov.hide_ankimcp_ui(mgr) is True
+    assert mgr.writes == [
+        (
+            "ankimcp",
+            {"show_toolbar_indicator": False, "show_settings_menu_item": False},
+        )
+    ]
+    assert any("hid AnkiMCP UI" in l for l in logs)
 
 
-def test_hide_indicator_noop_when_ankimcp_absent(logs):
-    prov = make_addon_provisioner(logs)
+def test_hide_ui_noop_when_ankimcp_absent(logs):
+    prov = make_addon_provisioner(logs, **_ui_on())
     # A sibling add-on is installed, but none declares the AnkiMCP package.
     mgr = FakeAddonManager(
         configs={"some_other_addon": {"foo": 1}},
         packages={"some_other_addon": "com.example.other"},
     )
 
-    assert prov.hide_ankimcp_indicator(mgr) is False
+    assert prov.hide_ankimcp_ui(mgr) is False
     assert mgr.writes == []
     # the silence that hid this bug for a release is now a greppable warning
     assert any("CI_BUDDY_ADDON_PACKAGE_NOT_FOUND" in l for l in logs)
 
 
-def test_hide_indicator_noop_when_no_manager(logs):
-    prov = make_addon_provisioner(logs)
-    assert prov.hide_ankimcp_indicator(None) is False
+def test_hide_ui_noop_when_no_manager(logs):
+    prov = make_addon_provisioner(logs, **_ui_on())
+    assert prov.hide_ankimcp_ui(None) is False
 
 
 def test_installed_addon_packages_reads_manifest_and_is_defensive(tmp_path):
@@ -671,7 +789,7 @@ def test_installed_addon_packages_empty_when_no_enumeration_api():
     assert _installed_addon_packages(types.SimpleNamespace()) == []
 
 
-def test_hide_indicator_uses_original_writeconfig_through_shim(logs):
+def test_hide_ui_uses_original_writeconfig_through_shim(logs):
     # The core interaction: locks Seam 4 replaces writeConfig with a shim that
     # DROPS writes but stashes the original on itself under
     # core.ORIGINAL_WRITE_CONFIG_ATTR (the shared contract constant; the
@@ -691,13 +809,25 @@ def test_hide_indicator_uses_original_writeconfig_through_shim(logs):
 
     # Real enumeration API (allAddons/addonsFolder/getConfig) via FakeAddonManager,
     # but writeConfig swapped for the Seam-4 dropping shim.
-    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
     mgr.writeConfig = dropping_shim
 
-    prov = make_addon_provisioner(logs)
-    assert prov.hide_ankimcp_indicator(mgr) is True
+    prov = make_addon_provisioner(logs, **_ui_on())
+    assert prov.hide_ankimcp_ui(mgr) is True
     # persisted via the ORIGINAL, not dropped by the shim
-    assert real_writes == [(core.ANKIMCP_PACKAGE, {"show_toolbar_indicator": False})]
+    assert real_writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {"show_toolbar_indicator": False, "show_settings_menu_item": False},
+        )
+    ]
 
 
 def test_real_write_config_falls_through_without_shim():
@@ -709,10 +839,17 @@ def test_real_write_config_falls_through_without_shim():
     assert _real_write_config(mgr) == mgr.writeConfig
 
 
-def test_register_hides_indicator_at_load_time(monkeypatch):
-    # register() must coerce the indicator immediately (not on a hook), using
-    # the addonManager on mw.
-    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+def test_register_hides_ui_at_load_time(monkeypatch):
+    # register() must coerce the UI keys immediately (not on a hook), using the
+    # addonManager on mw — both gated keys in one write.
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
     aqt_mod = types.ModuleType("aqt")
     aqt_mod.mw = types.SimpleNamespace(addonManager=mgr)
     aqt_mod.gui_hooks = types.SimpleNamespace(
@@ -729,14 +866,28 @@ def test_register_hides_indicator_at_load_time(monkeypatch):
                 "provisioning_enabled": False,
                 "ensure_latex_generation": False,
                 "hide_ankimcp_toolbar_indicator": True,
+                "hide_ankimcp_settings_menu_item": True,
             }
         )
     )
-    assert mgr.writes == [(core.ANKIMCP_PACKAGE, {"show_toolbar_indicator": False})]
+    assert mgr.writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {"show_toolbar_indicator": False, "show_settings_menu_item": False},
+        )
+    ]
 
 
-def test_register_skips_indicator_when_flag_off(monkeypatch):
-    mgr = FakeAddonManager({core.ANKIMCP_PACKAGE: {"show_toolbar_indicator": True}})
+def test_register_hides_ui_when_only_one_gate_on(monkeypatch):
+    # a single gate is enough to run the coercion (menu-item only here)
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
     aqt_mod = types.ModuleType("aqt")
     aqt_mod.mw = types.SimpleNamespace(addonManager=mgr)
     aqt_mod.gui_hooks = types.SimpleNamespace(
@@ -753,6 +904,44 @@ def test_register_skips_indicator_when_flag_off(monkeypatch):
                 "provisioning_enabled": False,
                 "ensure_latex_generation": False,
                 "hide_ankimcp_toolbar_indicator": False,
+                "hide_ankimcp_settings_menu_item": True,
+            }
+        )
+    )
+    assert mgr.writes == [
+        (
+            core.ANKIMCP_PACKAGE,
+            {"show_toolbar_indicator": True, "show_settings_menu_item": False},
+        )
+    ]
+
+
+def test_register_skips_ui_when_both_gates_off(monkeypatch):
+    mgr = FakeAddonManager(
+        {
+            core.ANKIMCP_PACKAGE: {
+                "show_toolbar_indicator": True,
+                "show_settings_menu_item": True,
+            }
+        }
+    )
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.mw = types.SimpleNamespace(addonManager=mgr)
+    aqt_mod.gui_hooks = types.SimpleNamespace(
+        profile_did_open=FakeHook(),
+        profile_will_close=FakeHook(),
+        collection_did_load=FakeHook(),
+        sync_did_finish=FakeHook(),
+    )
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+
+    register(
+        core.merge_config(
+            {
+                "provisioning_enabled": False,
+                "ensure_latex_generation": False,
+                "hide_ankimcp_toolbar_indicator": False,
+                "hide_ankimcp_settings_menu_item": False,
             }
         )
     )

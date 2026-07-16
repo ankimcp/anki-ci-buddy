@@ -89,7 +89,13 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. Safe no-op if AnkiMCP isn't installed, exposes no config, or already has the flag off (idempotent — never re-writes `meta.json`). Independent of `provisioning_enabled`. |
+| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. Independent of `provisioning_enabled`. |
+| `hide_ankimcp_settings_menu_item` | `true` | Forces the AnkiMCP server add-on's `show_settings_menu_item` config key **off**, hiding its *AnkiMCP Server Settings…* entry from Anki's Tools menu in the managed environment. Independent of `provisioning_enabled`. |
+
+These two gates cover independent AnkiMCP UI surfaces; each is applied only if
+its own flag is `true`. Both are forced in a **single** `getConfig`/`writeConfig`
+pass. Safe no-op if AnkiMCP isn't installed, exposes no config, or every enabled
+key is already off (idempotent — never re-writes `meta.json`).
 
 > **How AnkiMCP is located (directory vs. manifest package).** Anki keys
 > `addonManager.getConfig`/`writeConfig` by an add-on's on-disk **directory**
@@ -112,12 +118,12 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 > the two modules.
 >
 > The write happens at ci-buddy **add-on load time**, not on a GUI hook. AnkiMCP
-> reads `show_toolbar_indicator` exactly once, inside its `main_window_did_init`
-> handler, and Anki fires that hook only after every add-on has finished
-> importing — so ci-buddy's load-time write lands *before* AnkiMCP reads the
-> flag. The indicator is therefore hidden on the **very first** window of the
-> session (not just after a restart, which is what a manual config edit would
-> require).
+> reads both `show_toolbar_indicator` and `show_settings_menu_item` exactly once,
+> inside its `main_window_did_init` handler, and Anki fires that hook only after
+> every add-on has finished importing — so ci-buddy's load-time write lands
+> *before* AnkiMCP reads the flags. The surfaces are therefore hidden on the
+> **very first** window of the session (not just after a restart, which is what a
+> manual config edit would require).
 
 ### Credentials file contract
 

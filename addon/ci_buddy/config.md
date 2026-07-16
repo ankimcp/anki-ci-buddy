@@ -26,10 +26,16 @@ with a warning printed to the container log (never a crash).
 | `lock_addon_config_writes` | `true` | Replaces `addonManager.writeConfig` with a shim that silently drops writes (config changes become non-durable). Reads are unaffected. |
 | `lock_profile_switch` | `true` | File → Switch Profile (`actionSwitchProfile`). |
 | `lock_upgrade_downgrade` | `true` | Tools → Upgrade/Downgrade (`action_upgrade_downgrade`; usually already auto-hidden on headless/PyPI installs). |
+| `lock_check_for_updates` | `true` | Tools → Check for Updates (`action_check_for_updates`). The action only exists on Anki **26.05+** (25.07–25.09 only have `action_upgrade_downgrade`; ≤25.02 has neither) — on versions without it the lock is skipped with a logged warning, never a crash. |
 | `lock_note_types` | `false` | Tools → Manage Note Types (`actionNoteTypes`). **Kept enabled by default** — editing templates/CSS is an explicit product decision. |
 | `lock_import` | `true` | File → Import (`actionImport`). Destructive (can replace the collection) → locked by default. |
 | `lock_open_backup` | `true` | File → Open Backup (`action_open_backup`). Destructive → locked by default. |
 | `lock_database_check` | `false` | Tools → Check Database (`actionFullDatabaseCheck`). Low-risk maintenance → unlocked by default; toggle to lock. |
+| `lock_file_menu` | `true` | The **entire File menu** (`menuCol`: Switch Profile / Import / Export / Create Backup / Open Backup / Exit). A QMenu is not a QAction, so it is locked via `menu.menuAction()` — `setVisible(False)` under `"hide"`, `setEnabled(False)` under `"disable"`. Subsumes the per-item File locks above; those remain useful when this is `false`. |
+
+Every `mw.form` attribute above is accessed with `getattr(..., None)`: a
+missing/renamed action or menu on **any** Anki version is skipped with a logged
+warning — an outdated map entry can never crash startup.
 
 ### Collection editing always stays usable
 
@@ -43,6 +49,12 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 | Key | Default | Meaning |
 |---|---|---|
 | `lock_debug_console` | `true` | Disables Anki's built-in Python debug console (the `Ctrl+:` / `Ctrl+Shift+;` REPL, an arbitrary-code-execution surface reachable over the noVNC desktop). No-ops `aqt.debug_console.show_debug_console` and disables the main-window `QShortcut` that opens it. Locked by default on the hosted appliance. |
+
+## Update checks (Part A, Seam 7)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `disable_update_checks` | `true` | Forces the **global** automatic update checks off via `mw.pm`: `set_update_check(False)` suppresses the startup "a new version of Anki is available" prompt, and `set_check_for_addon_updates(False)` suppresses the 24h-throttled add-on update fetch. Both flags live in `pm.meta` (`prefs21.db`, global — not per-profile). Applied at **add-on load time** every launch — the automatic checks fire inside `loadProfile`, *before* `main_window_did_init`, so a hook-time force would be too late; and re-forcing each launch means a value re-enabled via Preferences only survives until the next boot. `set_check_for_addon_updates` only exists on Anki **26.05+**: on ≤ 25.09 only the app-update prompt is suppressed — the add-on-update check has no `pm` gate there and stays active — and the missing setter is skipped with a logged warning each boot, never a crash. |
 
 ## Sync surfaces (Part A, Seam 5)
 

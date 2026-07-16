@@ -38,11 +38,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lock_addon_config_writes": True,
     "lock_profile_switch": True,
     "lock_upgrade_downgrade": True,
+    "lock_check_for_updates": True,
     "lock_note_types": False,
     "lock_import": True,
     "lock_open_backup": True,
     "lock_database_check": False,
+    "lock_file_menu": True,
     "lock_debug_console": True,
+    "disable_update_checks": True,
     "strip_sync_link": False,
     "provisioning_enabled": False,
     "credentials_path": "/run/ankimcp/sync-credentials.json",
@@ -66,11 +69,38 @@ LOCK_ACTION_MAP: dict[str, str] = {
     "lock_addons": "actionAdd_ons",
     "lock_profile_switch": "actionSwitchProfile",
     "lock_upgrade_downgrade": "action_upgrade_downgrade",
+    # Tools → Check for Updates. The action only exists on Anki 26.05+ (older
+    # builds have only ``action_upgrade_downgrade``); on versions without it
+    # the applier skips the attr with a logged warning — never a crash.
+    "lock_check_for_updates": "action_check_for_updates",
     "lock_note_types": "actionNoteTypes",
     "lock_import": "actionImport",
     "lock_open_backup": "action_open_backup",
     "lock_database_check": "actionFullDatabaseCheck",
 }
+
+#: Maps a boolean config key to the ``mw.form`` **QMenu** attribute it locks.
+#: A QMenu is not a QAction — hiding/greying a whole menu goes through
+#: ``menu.menuAction()`` — so menus live in their own map rather than
+#: ``LOCK_ACTION_MAP``. ``menuCol`` is the File menu ("&File": Switch Profile /
+#: Import / Export / Create Backup / Open Backup / Exit; object name and
+#: contents verified against aqt ``forms/main.ui``).
+LOCK_MENU_MAP: dict[str, str] = {
+    "lock_file_menu": "menuCol",
+}
+
+#: The ``mw.pm`` setters that ``disable_update_checks`` forces to ``False``:
+#: ``set_update_check`` (all modern versions) gates ``setup_auto_update``'s
+#: "new version released" prompt, and ``set_check_for_addon_updates`` (26.05+
+#: only — it does not exist on any Anki ≤ 25.09) gates the 24h-throttled
+#: add-on update fetch. Both are global (pm.meta / prefs21.db), not
+#: per-profile. On ≤ 25.09 only the app-update prompt is suppressed: the
+#: add-on-update check has no pm gate there and stays active, and the applier
+#: skips the absent setter with a logged warning each boot — never a crash.
+UPDATE_CHECK_SETTERS: tuple[str, ...] = (
+    "set_update_check",
+    "set_check_for_addon_updates",
+)
 
 #: Maps a boolean config key to the exact ``aqt.DialogManager`` registry name
 #: that Seam 2 disables when that key is set. EXACT match only — an over-broad
@@ -142,6 +172,18 @@ def action_lock_plan(config: dict[str, Any]) -> dict[str, bool]:
     return {
         attr: bool(config.get(cfg_key, False))
         for cfg_key, attr in LOCK_ACTION_MAP.items()
+    }
+
+
+def menu_lock_plan(config: dict[str, Any]) -> dict[str, bool]:
+    """Map ``mw.form`` QMenu attr → whether the whole menu should be locked.
+
+    Mirrors ``action_lock_plan`` for ``LOCK_MENU_MAP`` — the decision lives
+    here (unit-testable); locks.py just applies it via ``menu.menuAction()``.
+    """
+    return {
+        attr: bool(config.get(cfg_key, False))
+        for cfg_key, attr in LOCK_MENU_MAP.items()
     }
 
 

@@ -34,11 +34,54 @@ class FakeDialog:
         self.enabled = value
 
 
+class FakeAction:
+    def __init__(self):
+        self.visible = True
+        self.enabled = True
+
+    def setVisible(self, value):
+        self.visible = value
+
+    def setEnabled(self, value):
+        self.enabled = value
+
+
+class FakeMenu:
+    """A QMenu stand-in: locked through ``menuAction()``, like the real thing."""
+
+    def __init__(self):
+        self._menu_action = FakeAction()
+
+    def menuAction(self):
+        return self._menu_action
+
+
+class FakePM:
+    def __init__(self):
+        self.calls: list[tuple[str, bool]] = []
+
+    def set_update_check(self, on):
+        self.calls.append(("set_update_check", on))
+
+    def set_check_for_addon_updates(self, on):
+        self.calls.append(("set_check_for_addon_updates", on))
+
+
 def install_fake_aqt(monkeypatch, mw):
     aqt_mod = types.ModuleType("aqt")
     aqt_mod.mw = mw
     monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
     return mw
+
+
+def make_form_with_all_lock_targets():
+    """A fake ``mw.form`` carrying every action/menu attr in the lock maps."""
+    form = types.SimpleNamespace()
+    for attr in core.LOCK_ACTION_MAP.values():
+        setattr(form, attr, FakeAction())
+    for attr in core.LOCK_MENU_MAP.values():
+        setattr(form, attr, FakeMenu())
+    return form
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +90,131 @@ def _reset_shim_ref():
     locks._original_write_config = None
     yield
     locks._original_write_config = None
+
+
+# --------------------------------------------------------------------------- #
+# Seam 1 — menu action + whole-menu locks
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_menu_locks_hides_actions_and_file_menu(monkeypatch):
+    form = make_form_with_all_lock_targets()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({}))
+
+    # default-locked actions are hidden (hide mode), not disabled
+    assert form.actionPreferences.visible is False
+    assert form.actionPreferences.enabled is True
+    assert form.action_check_for_updates.visible is False
+    # the File menu is hidden via its menuAction (a QMenu is not a QAction)
+    assert form.menuCol.menuAction().visible is False
+    # default-unlocked actions stay untouched
+    assert form.actionNoteTypes.visible is True
+    assert form.actionFullDatabaseCheck.visible is True
+
+
+def test_apply_menu_locks_disable_mode_greys_out(monkeypatch):
+    form = make_form_with_all_lock_targets()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({"hide_vs_disable": "disable"}))
+
+    assert form.actionPreferences.enabled is False
+    assert form.actionPreferences.visible is True
+    assert form.menuCol.menuAction().enabled is False
+    assert form.menuCol.menuAction().visible is True
+
+
+def test_apply_menu_locks_gates_off_leave_targets_alone(monkeypatch):
+    form = make_form_with_all_lock_targets()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(
+        core.merge_config(
+            {"lock_check_for_updates": False, "lock_file_menu": False}
+        )
+    )
+
+    assert form.action_check_for_updates.visible is True
+    assert form.menuCol.menuAction().visible is True
+
+
+def test_apply_menu_locks_missing_attrs_warn_not_crash(monkeypatch, capsys):
+    # A bare form (e.g. an older/newer Anki that renamed everything) must be a
+    # logged skip for every locked attr — never an AttributeError crash.
+    form = types.SimpleNamespace()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    # e.g. action_check_for_updates only exists on 26.05+ — warned, skipped
+    assert "action_check_for_updates" in out
+    assert "menuCol" in out
+    assert "lock skipped" in out
+
+
+def test_apply_menu_locks_menu_without_menu_action_warns(monkeypatch, capsys):
+    # A menuCol attr that is not menu-shaped (no callable menuAction) is a
+    # logged skip too — the guard covers renamed AND reshaped attrs.
+    form = make_form_with_all_lock_targets()
+    form.menuCol = object()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({}))
+
+    assert "menuCol" in capsys.readouterr().out
+
+
+def test_apply_menu_locks_reshaped_action_warns_and_continues(
+    monkeypatch, capsys
+):
+    # An action attr that exists but is not action-shaped (no callable
+    # setVisible/setEnabled) is a logged skip too — and per-item: it must
+    # never abort the loop, so every remaining action lock and the whole-menu
+    # lock still apply.
+    form = make_form_with_all_lock_targets()
+    form.actionPreferences = object()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "actionPreferences" in out
+    assert "lock skipped" in out
+    # downstream locks in the maps were still applied
+    assert form.actionImport.visible is False
+    assert form.menuCol.menuAction().visible is False
+
+
+def test_apply_menu_locks_menu_action_not_action_shaped_warns(
+    monkeypatch, capsys
+):
+    # A menu whose menuAction() is callable but returns a non-action must be
+    # a logged skip too — same _action_shaped guard as the action path — and
+    # per-item: the remaining action locks still apply.
+    class WeirdMenu:
+        def menuAction(self):
+            return object()
+
+    form = make_form_with_all_lock_targets()
+    form.menuCol = WeirdMenu()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "menuCol" in out
+    assert "lock skipped" in out
+    # other locks were still applied
+    assert form.actionPreferences.visible is False
+    assert form.actionImport.visible is False
+
+
+def test_apply_menu_locks_no_form_is_noop(monkeypatch):
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=None))
+    locks.apply_menu_locks(core.merge_config({}))  # must not raise
 
 
 # --------------------------------------------------------------------------- #
@@ -260,3 +428,108 @@ def test_disable_debug_console_shortcut_targets_only_console_keys(monkeypatch):
 
     assert debug_sc.enabled is False  # console shortcut disabled
     assert other_sc.enabled is True  # unrelated shortcut untouched
+
+
+# --------------------------------------------------------------------------- #
+# Seam 7 — suppress automatic update checks
+# --------------------------------------------------------------------------- #
+
+
+def test_disable_automatic_update_checks_forces_both_flags_off(monkeypatch):
+    pm = FakePM()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(pm=pm))
+
+    locks.disable_automatic_update_checks()
+
+    assert pm.calls == [
+        ("set_update_check", False),
+        ("set_check_for_addon_updates", False),
+    ]
+
+
+def test_disable_automatic_update_checks_missing_setter_warns(
+    monkeypatch, capsys
+):
+    # An aqt build that renamed one setter: the other is still applied, the
+    # missing one is a logged skip — never an AttributeError crash.
+    class PartialPM:
+        def __init__(self):
+            self.calls = []
+
+        def set_update_check(self, on):
+            self.calls.append(("set_update_check", on))
+
+    pm = PartialPM()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(pm=pm))
+
+    locks.disable_automatic_update_checks()
+
+    assert pm.calls == [("set_update_check", False)]
+    assert "set_check_for_addon_updates" in capsys.readouterr().out
+
+
+def test_disable_automatic_update_checks_no_pm_warns_not_crashes(
+    monkeypatch, capsys
+):
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(pm=None))
+    locks.disable_automatic_update_checks()  # must not raise
+    assert "mw.pm unavailable" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# register — Seam 7 gating and load-time application
+# --------------------------------------------------------------------------- #
+
+
+class _FakeHook:
+    def __init__(self):
+        self.handlers = []
+
+    def append(self, fn):
+        self.handlers.append(fn)
+
+
+def _install_fake_aqt_for_register(monkeypatch, pm):
+    """Fake ``aqt`` with the gui_hooks + mw surface ``locks.register`` touches
+    (the debug-console and writeConfig seams are gated off by the caller)."""
+    hooks = types.SimpleNamespace(
+        main_window_did_init=_FakeHook(),
+        dialog_manager_did_open_dialog=_FakeHook(),
+        addons_dialog_will_show=_FakeHook(),
+        top_toolbar_did_init_links=_FakeHook(),
+        profile_did_open=_FakeHook(),
+    )
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.gui_hooks = hooks
+    aqt_mod.mw = types.SimpleNamespace(pm=pm, addonManager=None, form=None)
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+    return hooks
+
+
+#: Gates off the register seams that would need extra fake modules, leaving the
+#: Seam 7 behaviour under test isolated.
+_REGISTER_BASE = {"lock_addon_config_writes": False, "lock_debug_console": False}
+
+
+def test_register_suppresses_update_checks_at_load_time(monkeypatch):
+    pm = FakePM()
+    _install_fake_aqt_for_register(monkeypatch, pm)
+
+    locks.register(core.merge_config(_REGISTER_BASE))
+
+    # Applied immediately at register (add-on load) time — NOT deferred to a
+    # hook: the automatic checks fire inside loadProfile, which runs before
+    # main_window_did_init, so a hook-time force would lose the race.
+    assert ("set_update_check", False) in pm.calls
+    assert ("set_check_for_addon_updates", False) in pm.calls
+
+
+def test_register_gate_off_leaves_update_checks_alone(monkeypatch):
+    pm = FakePM()
+    _install_fake_aqt_for_register(monkeypatch, pm)
+
+    locks.register(
+        core.merge_config(dict(_REGISTER_BASE, disable_update_checks=False))
+    )
+
+    assert pm.calls == []

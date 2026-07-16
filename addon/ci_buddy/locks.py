@@ -42,13 +42,39 @@ def _safe(fn: Callable[..., Any]) -> Callable[..., Any]:
 # --------------------------------------------------------------------------- #
 
 
+def _lock_action(action: Any, hide: bool) -> None:
+    """Hide (``setVisible(False)``) or grey out (``setEnabled(False)``) a
+    QAction, per the ``hide_vs_disable`` decision already made in core."""
+    if hide:
+        action.setVisible(False)
+    else:
+        action.setEnabled(False)
+
+
+def _action_shaped(action: Any) -> bool:
+    """True when ``action`` can be locked by ``_lock_action`` — i.e. it is
+    QAction-shaped (callable ``setVisible``/``setEnabled``). Guards against an
+    attr that exists but was reshaped into something else on a newer Anki."""
+    return callable(getattr(action, "setVisible", None)) and callable(
+        getattr(action, "setEnabled", None)
+    )
+
+
 def apply_menu_locks(config: dict[str, Any]) -> None:
-    """Hide/disable the locked menu actions on ``mw.form`` (Seam 1).
+    """Hide/disable the locked menu actions and whole menus on ``mw.form``
+    (Seam 1).
 
     Prefer disabling the menu *action* over the shown dialog: nothing gets
-    constructed and there is no visible flash. Unknown/absent action attrs are
-    skipped silently (Anki auto-hides ``action_upgrade_downgrade`` when no
-    launcher is present — that is fine).
+    constructed and there is no visible flash. Every lock is applied
+    independently: a missing/renamed attr, or one that exists but is no longer
+    action/menu-shaped, on ANY Anki version is skipped with a logged warning —
+    it never aborts the remaining locks or crashes with an ``AttributeError``
+    (e.g. ``action_check_for_updates`` only exists on 26.05+,
+    ``action_upgrade_downgrade`` only on 25.07+).
+
+    Whole menus (``core.LOCK_MENU_MAP``, e.g. the File menu ``menuCol``) are a
+    QMenu, not a QAction, so they are locked through ``menu.menuAction()`` —
+    the standard Qt way to hide/grey a menu-bar menu.
     """
     from aqt import mw  # lazy — keeps this module import-safe for tests
 
@@ -61,12 +87,27 @@ def apply_menu_locks(config: dict[str, Any]) -> None:
         if not should_lock:
             continue
         action = getattr(form, attr, None)
-        if action is None:
+        if not _action_shaped(action):
+            print(
+                f"[ci_buddy] warning: menu action {attr!r} not present or not "
+                "action-shaped on this Anki version (lock skipped)"
+            )
             continue
-        if hide:
-            action.setVisible(False)
-        else:
-            action.setEnabled(False)
+        _lock_action(action, hide)
+
+    for attr, should_lock in core.menu_lock_plan(config).items():
+        if not should_lock:
+            continue
+        menu = getattr(form, attr, None)
+        menu_action_getter = getattr(menu, "menuAction", None)
+        menu_action = menu_action_getter() if callable(menu_action_getter) else None
+        if not _action_shaped(menu_action):
+            print(
+                f"[ci_buddy] warning: menu {attr!r} not present or not "
+                "menu-shaped on this Anki version (lock skipped)"
+            )
+            continue
+        _lock_action(menu_action, hide)
 
 
 # --------------------------------------------------------------------------- #
@@ -281,6 +322,47 @@ def disable_debug_console_shortcut() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seam 7 (config-gated) — suppress automatic update checks
+# --------------------------------------------------------------------------- #
+
+
+def disable_automatic_update_checks() -> None:
+    """Force the global app-update and add-on-update checks off via ``mw.pm``
+    (Seam 7).
+
+    Calls each setter in ``core.UPDATE_CHECK_SETTERS`` with ``False``:
+    ``pm.set_update_check(False)`` suppresses the "new version released"
+    prompt (``setup_auto_update`` → ``aqt.update.check_for_update``) and
+    ``pm.set_check_for_addon_updates(False)`` suppresses the 24h-throttled
+    add-on update fetch. Both live in pm.meta (global, prefs21.db), which is
+    loaded before add-ons import — so the values are already in force for this
+    launch's checks. Re-applied every launch, so a user re-enabling the checks
+    in Preferences only lasts until the next boot.
+
+    Version-safe: a missing ``pm`` or an absent/renamed setter is skipped with
+    a logged warning — never an ``AttributeError`` crash.
+    """
+    from aqt import mw  # lazy — keeps this module import-safe for tests
+
+    pm = getattr(mw, "pm", None)
+    if pm is None:
+        print(
+            "[ci_buddy] warning: mw.pm unavailable; cannot suppress automatic "
+            "update checks"
+        )
+        return
+    for setter_name in core.UPDATE_CHECK_SETTERS:
+        setter = getattr(pm, setter_name, None)
+        if not callable(setter):
+            print(
+                f"[ci_buddy] warning: pm.{setter_name} not present on this "
+                "Anki version (update-check suppression skipped)"
+            )
+            continue
+        setter(False)
+
+
+# --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
 
@@ -295,7 +377,15 @@ def register(config: dict[str, Any]) -> None:
     if config.get("lock_addon_config_writes", True):
         _safe(install_write_config_shim)()
 
-    # Seam 1: menu actions, applied once the main window is built.
+    # Seam 7: suppress automatic update checks. Applied NOW (at add-on load),
+    # not on a hook: pm.meta is already loaded when add-ons import, and the
+    # automatic checks fire inside loadProfile — which aqt runs BEFORE emitting
+    # main_window_did_init (``on_window_init`` calls setupProfile first) — so a
+    # hook-time force could lose that race on the very first launch check.
+    if config.get("disable_update_checks", True):
+        _safe(disable_automatic_update_checks)()
+
+    # Seam 1: menu actions + whole menus, applied once the main window is built.
     gui_hooks.main_window_did_init.append(_safe(lambda: apply_menu_locks(config)))
 
     # Seam 2: programmatic-open guard, exact-name filtered and config-gated.

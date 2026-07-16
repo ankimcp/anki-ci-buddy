@@ -59,6 +59,8 @@ def test_action_lock_plan_respects_flags_and_keeps_note_types():
     assert plan["actionAdd_ons"] is True
     assert plan["actionImport"] is True
     assert plan["action_open_backup"] is True
+    # Check for Updates (26.05+) is locked by default too
+    assert plan["action_check_for_updates"] is True
     # defaults keep these enabled
     assert plan["actionNoteTypes"] is False
     assert plan["actionFullDatabaseCheck"] is False
@@ -68,6 +70,32 @@ def test_note_types_never_in_lock_map_by_accident():
     # actionNoteTypes is present but only lockable via explicit lock_note_types.
     plan = core.action_lock_plan(core.merge_config({"lock_note_types": False}))
     assert plan["actionNoteTypes"] is False
+
+
+def test_check_for_updates_lock_is_gateable():
+    plan = core.action_lock_plan(
+        core.merge_config({"lock_check_for_updates": False})
+    )
+    assert plan["action_check_for_updates"] is False
+
+
+def test_menu_lock_plan_locks_file_menu_by_default():
+    # menuCol is the File menu's object name in aqt forms/main.ui.
+    assert core.menu_lock_plan(core.DEFAULT_CONFIG) == {"menuCol": True}
+
+
+def test_menu_lock_plan_respects_gate_off():
+    plan = core.menu_lock_plan(core.merge_config({"lock_file_menu": False}))
+    assert plan == {"menuCol": False}
+
+
+def test_update_check_setters_pin_the_pm_contract():
+    # The exact mw.pm setter names Seam 7 calls (aqt/profiles.py); a rename in
+    # aqt must be caught here, not by a runtime warning alone.
+    assert core.UPDATE_CHECK_SETTERS == (
+        "set_update_check",
+        "set_check_for_addon_updates",
+    )
 
 
 # --- Seam 2 config-gated dialog names (MEDIUM-2) ------------------------- #

@@ -2,7 +2,7 @@
 
 Implementation spec for a small Anki add-on that (A) **locks the GUI** of a hosted / CI
 Anki instance and (B) **provisions AnkiWeb sync credentials** so sync works despite the
-lock. Written for an implementing agent. Target: **PyPI `aqt` 25.9.2+, Python 3.12+**
+lock. Written for an implementing agent. Target: **PyPI `aqt` 26.5+, Python 3.12+**
 (the versions [headless-anki](../headless-anki) ships). Line numbers below are guidance,
 not contracts — resolve symbols by name.
 
@@ -360,7 +360,7 @@ coverage you don't have.
 
 ---
 
-## Appendix — key aqt/anki reference points (25.9.2, verify by symbol)
+## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.5 — verify by symbol)
 - `actionPreferences` → `main.py onPrefs` → `dialogs.open("Preferences", mw)`;
   `Preferences(QDialog)` in `preferences.py` (sync login/logout + custom URL live here).
 - `dialog_manager_did_open_dialog` — fires from `aqt/dialogs.py open()` (create + reactivate);

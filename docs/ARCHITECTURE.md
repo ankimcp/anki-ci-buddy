@@ -118,7 +118,8 @@ object-store FUSE mount (WAL locking + `-shm` mmap break).
   `--use-server-modtime`, a cold rescan issues **one HEAD per file** (~30k requests for a 30GB
   library); with it, modtimes ride the LIST (~30 requests) and stay consistent, so no re-hashing.
 
-**Verified against Anki source (25.09.2):** media writes are whole-file (`std::fs::write`), no
+**Verified against Anki source (25.09.2; the image now ships `aqt==26.5` — not re-verified
+against it):** media writes are whole-file (`std::fs::write`), no
 partial/append writes, no fsync/flock/chmod/symlink/mmap on media files — the access pattern
 object storage handles natively. The rejected alternatives (JuiceFS, Mountpoint-S3) and the one
 open verification item (directory-mtime semantics over rclone — Anki's change-tracker keys on

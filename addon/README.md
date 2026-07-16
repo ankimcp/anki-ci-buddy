@@ -18,7 +18,7 @@ nothing here can crash Anki startup or block the collection.
 Full spec: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Platform context:
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-Target: PyPI `aqt` 25.9.2+, Python 3.12+.
+Target: PyPI `aqt` 26.5+, Python 3.12+.
 
 ## Layout
 

@@ -6,7 +6,7 @@ component `pod`). Written for an implementing agent. The image **lands in the
 [`headless-anki`](../../headless-anki) repo** later; this spec lives here because it is a
 platform decision, not an isolated image tweak.
 
-**Target:** Anki via PyPI `aqt==25.9.2` on Python 3.12 (the version headless-anki already ships
+**Target:** Anki via PyPI `aqt==26.5` on Python 3.12 (the version headless-anki already ships
 and ci-buddy targets — [../REQUIREMENTS.md](../REQUIREMENTS.md) §Target). Do not float the pin;
 the baked add-ons and the add-on-download URL scheme are version-coupled.
 
@@ -60,12 +60,12 @@ credentials** (ARCHITECTURE §3, §10 Layer 2). The FUSE privilege question is *
 
 ## 2. Software inventory
 
-Layered on `x11-vnc` (which already brings `python:3.12-slim`, `aqt==25.9.2`, Qt6/xcb libs,
+Layered on `x11-vnc` (which already brings `python:3.12-slim`, `aqt==26.5`, Qt6/xcb libs,
 `Xvfb`, `openbox`, `x11vnc`, `curl`, `jq`, `unzip`, `mpv`, `lame`, locale).
 
 | Component | Source / pin | Why | Notes |
 |---|---|---|---|
-| **Anki** | `aqt==25.9.2` (inherited from `base`) | The app | Pin matches ci-buddy target; do not bump silently |
+| **Anki** | `aqt==26.5` (inherited from `base`) | The app | Pin matches ci-buddy target; do not bump silently |
 | **ci_buddy add-on** | baked from this repo (`.ankiaddon` or raw `ci_buddy/`) | GUI lock + hkey injection | Hosted config overrides applied (§3.4) |
 | **AnkiMCP server add-on** | baked from `anki-mcp-server-addon` | MCP transport + sync executor | Owns `sync()`; ci-buddy only seeds the credential ([../REQUIREMENTS.md](../REQUIREMENTS.md) §1) |
 | **rclone** | pinned release (e.g. `v1.6x.x`), verify latest at build | B2 media mount (ARCHITECTURE §4) | Only used in the **internal-mount** variant (§5.3); still installed in both for `rclone rc` drain client |
@@ -683,7 +683,7 @@ add-on's outbound tunnel connection, [contracts.md §7](./contracts.md)), **5572
 ## 13. Acceptance checklist
 
 - [ ] `hosted` variant extends `x11-vnc`, tagged `hosted-vX.Y.Z`, built in CI (multi-arch).
-- [ ] Anki `aqt==25.9.2` / py3.12; `ci_buddy` + AnkiMCP add-ons baked into an **image stash**
+- [ ] Anki `aqt==26.5` / py3.12; `ci_buddy` + AnkiMCP add-ons baked into an **image stash**
       (`/opt/ankimcp/addons/`), **not** onto the PVC mount path.
 - [ ] **Managed add-on overlay** reconciles code + `config.json` onto `/data/addons21` on start,
       version-gated, **preserving `user_files/`**; upgrades land on image bump.

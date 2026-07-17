@@ -1,19 +1,15 @@
 """Pure-logic helpers for ci-buddy — NO ``aqt``/``anki`` imports.
 
-Everything here is a plain function or dataclass so it can be unit-tested
-directly, without a running Anki. The GUI-touching code lives in
-``locks.py`` / ``provisioning.py`` and delegates the decisions to these helpers.
+Everything here is a plain function so it can be unit-tested directly, without
+a running Anki. The GUI-touching code lives in ``locks.py`` /
+``provisioners.py`` and delegates the decisions to these helpers.
 
 Kept deliberately dependency-free (stdlib only).
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import dataclass
 from typing import Any, Callable, Iterable
-from urllib.parse import urlsplit
 
 # --------------------------------------------------------------------------- #
 # Branding
@@ -36,23 +32,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lock_preferences": True,
     "lock_addons": True,
     "lock_addon_config_writes": True,
-    "lock_profile_switch": True,
+    # Multi-profile support (v0.7.0): hosted users manage their own Anki
+    # profiles, so the File menu and Switch Profile stay usable by default;
+    # every other File item is locked per-item below.
+    "lock_profile_switch": False,
     "lock_upgrade_downgrade": True,
     "lock_check_for_updates": True,
     "lock_note_types": False,
     "lock_import": True,
+    "lock_export": True,
+    "lock_create_backup": True,
     "lock_open_backup": True,
+    "lock_exit": True,
     "lock_database_check": False,
-    "lock_file_menu": True,
+    "lock_file_menu": False,
+    "lock_profile_manager_open_backup": True,
+    "lock_profile_manager_quit": True,
+    "lock_profile_manager_downgrade": True,
     "lock_debug_console": True,
     "sanitize_copy_debug_info": True,
     "disable_update_checks": True,
     "strip_sync_link": False,
-    "provisioning_enabled": False,
-    "credentials_path": "/run/ankimcp/sync-credentials.json",
-    "credentials_poll_seconds": 2,
-    "endpoint_allowlist": ["ankiweb.net", "ankiuser.net"],
-    "clear_key_on_close": True,
     "disable_native_auto_sync": False,
     "ensure_latex_generation": True,
     "hide_ankimcp_toolbar_indicator": True,
@@ -76,7 +76,14 @@ LOCK_ACTION_MAP: dict[str, str] = {
     "lock_check_for_updates": "action_check_for_updates",
     "lock_note_types": "actionNoteTypes",
     "lock_import": "actionImport",
+    # The remaining File-menu items (object names verified against aqt
+    # forms/main.ui): with the v0.7.0 defaults — file menu unlocked for
+    # multi-profile support — these keep everything except Switch Profile
+    # locked, so the File menu shows only Switch Profile.
+    "lock_export": "actionExport",
+    "lock_create_backup": "action_create_backup",
     "lock_open_backup": "action_open_backup",
+    "lock_exit": "actionExit",
     "lock_database_check": "actionFullDatabaseCheck",
 }
 
@@ -88,6 +95,21 @@ LOCK_ACTION_MAP: dict[str, str] = {
 #: contents verified against aqt ``forms/main.ui``).
 LOCK_MENU_MAP: dict[str, str] = {
     "lock_file_menu": "menuCol",
+}
+
+#: Maps a boolean config key to the ``mw.profileForm`` **QPushButton** attribute
+#: it locks on the profile-manager screen (Seam 9) — the screen File → Switch
+#: Profile opens, and the one shown at startup when no profile auto-loads.
+#: Button object names verified against aqt ``forms/profiles.ui``. Deliberately
+#: absent: ``login`` / ``add`` / ``rename`` / ``delete_2`` — product decision:
+#: hosted users manage their own profiles, including delete. Locked by default:
+#: ``openBackup`` (destructive collection restore, same surface as File → Open
+#: Backup), ``quit`` (exits Anki inside the pod → supervisor restart loop) and
+#: ``downgrade_button`` (schema downgrade + quit).
+PROFILE_MANAGER_LOCK_MAP: dict[str, str] = {
+    "lock_profile_manager_open_backup": "openBackup",
+    "lock_profile_manager_quit": "quit",
+    "lock_profile_manager_downgrade": "downgrade_button",
 }
 
 #: The ``mw.pm`` setters that ``disable_update_checks`` forces to ``False``:
@@ -207,117 +229,23 @@ def menu_lock_plan(config: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def profile_manager_lock_plan(config: dict[str, Any]) -> dict[str, bool]:
+    """Map ``mw.profileForm`` button attr → whether it should be locked
+    (Seam 9).
+
+    Mirrors ``action_lock_plan`` for ``PROFILE_MANAGER_LOCK_MAP`` — the
+    decision lives here (unit-testable); locks.py just applies it to the
+    profile-manager buttons.
+    """
+    return {
+        attr: bool(config.get(cfg_key, False))
+        for cfg_key, attr in PROFILE_MANAGER_LOCK_MAP.items()
+    }
+
+
 # --------------------------------------------------------------------------- #
-# Provisioning — credential parsing / decisions (spec Part B)
+# Sync surfaces (Seam 5)
 # --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True)
-class Credentials:
-    """A validated sync-credentials record (see the file contract, spec §B.2)."""
-
-    serial: int
-    hkey: str
-    endpoint: str | None = None
-    username: str | None = None
-
-
-class CredentialsError(ValueError):
-    """Raised when the credentials file is malformed. Callers treat as no-op."""
-
-
-def parse_credentials(raw: str) -> Credentials:
-    """Parse + validate the credentials JSON. Raise ``CredentialsError`` on any
-    problem (corrupt JSON, wrong types, missing required fields).
-
-    Required: ``serial`` (int), ``hkey`` (non-empty str).
-    Optional: ``endpoint`` (str), ``username`` (str). ``v`` is accepted and,
-    if present, must be ``1`` — an unknown schema version is rejected rather
-    than mis-applied.
-    """
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError) as exc:
-        raise CredentialsError(f"invalid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise CredentialsError("top-level JSON value is not an object")
-
-    version = data.get("v", 1)
-    if version != 1:
-        raise CredentialsError(f"unsupported schema version {version!r}")
-
-    serial = data.get("serial")
-    # bool is a subclass of int — exclude it explicitly.
-    if not isinstance(serial, int) or isinstance(serial, bool):
-        raise CredentialsError("'serial' must be an integer")
-
-    hkey = data.get("hkey")
-    if not isinstance(hkey, str) or not hkey:
-        raise CredentialsError("'hkey' must be a non-empty string")
-
-    endpoint = data.get("endpoint")
-    if endpoint is not None and (not isinstance(endpoint, str) or not endpoint):
-        raise CredentialsError("'endpoint' must be a non-empty string if present")
-
-    username = data.get("username")
-    if username is not None and not isinstance(username, str):
-        raise CredentialsError("'username' must be a string if present")
-
-    return Credentials(
-        serial=serial,
-        hkey=hkey,
-        endpoint=endpoint,
-        username=username or None,
-    )
-
-
-def should_inject(new_serial: int, last_applied_serial: int | None) -> bool:
-    """Inject only when the serial strictly increases (spec §B.2/B.3).
-
-    ``last_applied_serial is None`` means "nothing applied yet" → always inject.
-    A same-or-lower serial (including rollback) is a no-op.
-    """
-    if last_applied_serial is None:
-        return True
-    return new_serial > last_applied_serial
-
-
-def endpoint_allowed(endpoint: str, allowlist: Iterable[str]) -> bool:
-    """True if ``endpoint`` has an http(s) scheme and its host is in the
-    allowlist (exact host or a subdomain of an allowlisted host).
-
-    Anything that fails to parse, uses a non-http scheme, or points at a host
-    outside the allowlist is rejected → caller keeps the default endpoint
-    (spec §B.4, exfil hardening).
-    """
-    try:
-        parts = urlsplit(endpoint)
-    except ValueError:
-        return False
-
-    if parts.scheme not in ("http", "https"):
-        return False
-
-    host = (parts.hostname or "").lower()
-    if not host:
-        return False
-
-    for allowed in allowlist:
-        allowed = str(allowed).lower().strip()
-        if not allowed:
-            continue
-        if host == allowed or host.endswith("." + allowed):
-            return True
-    return False
-
-
-def hkey_fingerprint(hkey: str) -> str:
-    """Non-reversible short fingerprint (first 8 hex of sha256) for logging.
-
-    The hkey itself must NEVER be logged (spec §B.8); log this instead.
-    """
-    return hashlib.sha256(hkey.encode("utf-8")).hexdigest()[:8]
 
 
 def is_sync_toolbar_link(link_html: str) -> bool:
@@ -337,7 +265,7 @@ def is_sync_toolbar_link(link_html: str) -> bool:
 #: Attribute under which locks Seam 4's write-dropping ``writeConfig`` shim
 #: stashes the genuine original ``writeConfig``. Single source of truth for the
 #: producer (``locks.install_write_config_shim``) and the consumer
-#: (``provisioning._real_write_config``) — both modules already import ``core``,
+#: (``provisioners._real_write_config``) — both modules already import ``core``,
 #: so the contract has one name and can't silently drift between them.
 ORIGINAL_WRITE_CONFIG_ATTR = "_ci_buddy_original"
 
@@ -363,7 +291,7 @@ ANKIMCP_SETTINGS_MENU_ITEM_KEY = "show_settings_menu_item"
 #: The two are independent UI surfaces, each gated separately in ci-buddy's own
 #: config: a gate only forces its AnkiMCP key when that gate is enabled. Single
 #: source of truth for both the planner (``plan_hide_ankimcp_ui``) and the
-#: register-time gating in ``provisioning.register``.
+#: register-time gating in ``provisioners.register``.
 ANKIMCP_HIDE_KEY_MAP: dict[str, str] = {
     "hide_ankimcp_toolbar_indicator": ANKIMCP_TOOLBAR_INDICATOR_KEY,
     "hide_ankimcp_settings_menu_item": ANKIMCP_SETTINGS_MENU_ITEM_KEY,

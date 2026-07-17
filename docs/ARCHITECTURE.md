@@ -54,7 +54,7 @@ user traffic ────────> activator ──────────�
 | **operator** | new (Go, kubebuilder-style) | Reconciles each `AnkiInstance` CR into StatefulSet + PVC + Service + Secret mount. See §8. |
 | **pod** | image from `headless-anki` | Anki + ci-buddy add-on + AnkiMCP add-on + rclone mount + VNC server + websockify/noVNC. |
 | **dashboard GUI** | `anki-mcp-saas` | On/off, reset, embedded noVNC page. See §9. |
-| **ci-buddy add-on** | this repo | GUI lock + sync-credential injection ([../REQUIREMENTS.md](../REQUIREMENTS.md)). |
+| **ci-buddy add-on** | this repo | GUI lock + managed-config provisioners ([../REQUIREMENTS.md](../REQUIREMENTS.md)). Never touches sync credentials (removed in v1, §6): AnkiWeb login is manual over VNC and persists on the PVC. |
 
 > **2026-07-11 revision (see §16):** v1 ships **without the activator** — the data-plane half of
 > the map above is superseded. MCP reaches hosted pods through the existing SaaS **tunnel**
@@ -91,7 +91,7 @@ A user's data splits into two stores by one rule: **SQLite on block storage, med
 profile/                            ← per-user PVC (Hetzner Cloud Volume, 10GB — min volume size)
 ├── collection.anki2  (+wal/shm)    ← SQLite            → PVC  (never FUSE)
 ├── collection.media.db2 (+wal/shm) ← SQLite, mmaps -shm → PVC  (never FUSE)
-├── prefs21.db                      ← SQLite, holds hkey → PVC  (never FUSE)
+├── prefs21.db                      ← SQLite, holds hkey (manual AnkiWeb login, §6) → PVC  (never FUSE)
 ├── addons21/                       ← add-ons, meta.json, user_files → PVC
 ├── collection.media/  ──symlink──┐
 └── media.trash/       ──symlink──┤→ ONE rclone mount → Backblaze B2 (locked choice)
@@ -169,6 +169,15 @@ hooks own the quit/drain sequence. Ungraceful death needs no sequence: PVC + WAL
 cover it.
 
 ## 6. Sync credentials (hkey)
+
+> **REMOVED in v1 (2026-07, platform decision — supersedes everything below, including
+> §16.6's restart-based hkey pickup).** The hosted platform's GUI credential channel is
+> gone: the lifecycle service performs no password→hkey exchange, no per-user
+> sync-credentials Secret is written or mounted, and ci-buddy never touches sync
+> credentials. Instead the user logs into AnkiWeb **manually inside Anki over the VNC
+> desktop**; the login persists in `prefs21.db` on the PVC across pod restarts/sleep —
+> exactly like desktop Anki — and is wiped only when the instance (and its PVC) is
+> deleted. The bullets below are retained as history of the superseded design.
 
 - Control plane (dashboard) holds the AnkiWeb password, mints the **hkey**; the password never
   enters the pod. Delivery: **plain k8s Secret mounted as a file** (whole-volume mount, never
@@ -281,7 +290,8 @@ control-plane + worker (no separation). We own the entire isolation story — gr
 - Hubble gives observability to verify the policy actually bites.
 
 **Layer 2 — minimal secrets in the pod.** No ServiceAccount token
-(`automountServiceAccountToken: false`); no AnkiWeb password (only the revocable hkey); and a
+(`automountServiceAccountToken: false`); no *stored* AnkiWeb password — at rest the pod holds
+only the revocable hkey (in `prefs21.db`, from the user's own VNC login, §6); and a
 **per-user B2 application key restricted to that user's prefix** (B2 `namePrefix` keys). Prior
 art already in production: `docs/media-library-b2-provisioning.md` in the infrastructure repo
 uses exactly this bucket-scoped-key + per-user-prefix model — reuse it, don't invent a second
@@ -323,8 +333,8 @@ limit rather than pretending containers are a hard boundary.
 | 6 | **Custom activator** | **KEDA HTTP Add-on**: does request-hold well and STS scale-to-zero works, but one static routing object per user (thousands of ScaledObjects/HPAs, no dynamic fan-out) and raw-TCP VNC bypasses its HTTP interceptor entirely → would force a second custom path anyway. **Knative**: stateless-Revision model fights per-user pod+PVC identity. KEDA-now/swap-later was viable; user chose custom directly. |
 | 7 | **Activator owns idle TTL + downscale** | Only the traffic path knows last-activity. Control plane dumb, data plane smart. |
 | 8 | **Drain rclone before scale-down** | TTL (1h ≫ seconds of write-back) + drain + cache-on-PVC = belt and suspenders. |
-| 9 | **No credential sidecar** — plain Secret mount | Sidecar assumed long-running pods; scale-to-zero + live file-poll made it redundant; removing it removes k8s creds from the pod. Supersedes ci-buddy §C.2. |
-| 10 | hkey rotation UX = **explicit + LLM-retryable** ("Option 1") | Push delivery (upgrade path), pickup-confirmation (plumbing for a status line), sidecar (see 9). |
+| 9 | **No credential sidecar** — plain Secret mount | Sidecar assumed long-running pods; scale-to-zero + live file-poll made it redundant; removing it removes k8s creds from the pod. Supersedes ci-buddy §C.2. **(2026-07 — moot: the credential channel itself was removed in v1, §6.)** |
+| 10 | hkey rotation UX = **explicit + LLM-retryable** ("Option 1") | Push delivery (upgrade path), pickup-confirmation (plumbing for a status line), sidecar (see 9). **(2026-07 — superseded: credential channel removed in v1, §6; login is manual over VNC.)** |
 | 11 | **`AnkiInstance` CRD + Go operator** | Direct-from-nodejs: no self-healing, no owner for fleet-wide image rollouts, k8s logic scattered into a web service. |
 | 12 | GUI v1 = dashboard controls + **embedded noVNC**, session-routed, **no AnkiConnect** | Per-user URLs / second credentials: unnecessary — identity routes. AnkiConnect deferred until demand. |
 | 13 | **Media-sync stays ON; B2 = device disk, not sync truth** | "B2 as store of record" would break other devices' view; the pod is a peer device. |
@@ -363,8 +373,8 @@ limit rather than pretending containers are a hard boundary.
    door for hosted instances (in-cluster internal URL; the add-on dials out with a
    lifecycle-minted token, contracts.md §8c — no stored SaaS OAuth creds needed), and with the
    activator shelved it is not redundant with anything. The 2026-07-10 note stands only for what
-   it actually checked: the tunnel is still not a credential-push channel (decision-10 upgrade
-   path in §6 unchanged — hosted v1 uses restart-based hkey pickup anyway, §16).
+   it actually checked: the tunnel is still not a credential-push channel (moot since 2026-07 —
+   the credential channel was removed in v1, §6).
 6. ~~FUSE privilege model in the pod (rclone sidecar container vs CSI approach).~~ **RESOLVED
    (user, 2026-07-10): per-user rclone SIDECAR** (§10 layer 3). Implemented in `operator/`
    (`--media-mount-mode=sidecar`, default) + `headless-anki-image/` (`CONTAINER_ROLE=rclone-sidecar`);
@@ -399,7 +409,7 @@ limit rather than pretending containers are a hard boundary.
 
 | Repo | Impact |
 |---|---|
-| **this repo** | ci-buddy REQUIREMENTS **§C.2 (credential sidecar) superseded** by §6; **§B.6/Seam 5 hosted-defaults superseded** by §5 (no flipped sync config). Update on next spec touch. Component requirement docs to be added under `docs/`. |
+| **this repo** | ci-buddy REQUIREMENTS updated 2026-07: **Part B (credential provisioning) removed in v1** (§6) — ci-buddy never touches sync credentials; Seam 5 hosted-defaults aligned with decision 14. Component requirement docs to be added under `docs/`. |
 | **headless-anki** | Image additions: rclone (+mount wiring, cache-on-PVC, symlinks), websockify/noVNC, bake ci-buddy + AnkiMCP add-ons, graceful-quit hook for the downscale sequence. |
 | **anki-mcp-saas** | New atomic **lifecycle service**; dashboard pages (on/off, reset, noVNC embed, re-login flow with "active within a minute" note). **(2026-07-11, §16:)** plus the new **VNC gateway** (dumb authenticated pipe in the `anki-mcp-saas` stack, §16.3) and **tunnel-side work**: hosted-token validation against the lifecycle signing key (contracts.md §8c), the `ensureConnected` wake call + request hold (§16.5), and marking hosted connections as such. |
 | **anki-mcp-server-addon** | `auth_failed` payload gains the retry-after hint; regression guard: sync must keep building `SyncAuth` fresh per run (ci-buddy §B.7). **(2026-07-11, §16.1:)** new **`hosted_mode`** — auto-connect to the tunnel on profile open using the mounted `tunnel-credentials.json` token (contracts.md §8c), static token, **no reconnect ever** (all disconnects terminal), no interactive auth. |
@@ -553,9 +563,9 @@ dissolves (resolves contracts.md cross-cutting open decision #1).
 
 New CR field **`spec.restartedAt`** (RFC3339 timestamp, lifecycle-written). The operator copies
 the value into the StatefulSet pod template as an **annotation** (the `kubectl rollout restart`
-pattern) → pod recreated, **PVC untouched**. Used for: **hkey pickup after AnkiWeb (re)login**
-(v1 uses restart, NOT ci-buddy live injection — the live-pickup path stays built but unused for
-hosted v1) and **tunnel reconnect/takeover** (§16.5).
+pattern) → pod recreated, **PVC untouched**. Used for: **tunnel reconnect/takeover** (§16.5).
+(Formerly also hkey pickup after AnkiWeb re-login — moot since the credential channel was
+removed in v1, §6; login is manual over VNC and persists on the PVC.)
 
 ### 16.7 PVC deletion (resolves lifecycle §15.2b / §5.6 open item)
 

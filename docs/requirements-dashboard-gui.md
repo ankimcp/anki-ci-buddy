@@ -17,13 +17,20 @@
 > tunnel — no SPA work, but status copy may reference it.
 
 Implementation spec for the **v1 dashboard pages** of the Anki-as-a-Service platform: the
-per-user **instance control panel**, the embedded **noVNC** page, and the **AnkiWeb re-login
-flow**. Written for an implementing agent. Target repo: **`anki-mcp-saas`, `apps/web`**.
+per-user **instance control panel** and the embedded **noVNC** page. Written for an
+implementing agent. Target repo: **`anki-mcp-saas`, `apps/web`**.
+
+> **AnkiWeb re-login flow REMOVED in v1 (2026-07, platform decision).** The dashboard has
+> **no AnkiWeb credential surface**: no `ReloginForm`, no `reloginAnkiWeb` mutation, no
+> "credentials active within a minute" copy. The user signs into AnkiWeb **inside Anki, over
+> the embedded VNC desktop**; the login persists on the instance's PVC and is wiped only when
+> the instance is deleted ([`../REQUIREMENTS.md`](../REQUIREMENTS.md) Part B; ARCHITECTURE §6).
+> §7 below is retained as the notice + the sync `auth_failed` guidance (now pointing at VNC).
 
 **Authoritative inputs (do not contradict):**
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1, §2, §6, §9 (v1 scope), §10, §15; the shared
 [`contracts.md`](./contracts.md) registry; the ci-buddy add-on spec
-[`../REQUIREMENTS.md`](../REQUIREMENTS.md) (§B — provisioning/credential model). The
+[`../REQUIREMENTS.md`](../REQUIREMENTS.md) (Part B — sync credentials removed in v1). The
 **lifecycle-service API (`requirements-lifecycle-service.md`) now exists** — its §5 (API surface)
 and §10 (status projection) are the authoritative shape for everything below; where this spec
 still assumes, it is called out inline and collected in §13. Consume the lifecycle service; do not
@@ -51,9 +58,8 @@ Give a signed-in user a browser-only way to **see and control their own hosted A
    ticket (§6.2); **no auto-wake on this path** — the VNC *connection* requires the instance to
    be **on**; when asleep the page shows the sleep card with Start (§5.1.E, §6.4 step 3);
    reconnect; quality/scaling defaults; clipboard note.
-3. **AnkiWeb credentials (re-login) flow** — `username + password` → lifecycle service → hkey;
-   password never stored client-side beyond the request; "credentials active within a minute"
-   message; surface sync `auth_failed` guidance.
+3. ~~**AnkiWeb credentials (re-login) flow**~~ — **REMOVED in v1** (top banner): login happens
+   inside Anki over VNC. The dashboard only surfaces sync `auth_failed` guidance (§7).
 4. **AGPL "source code" link** (§15) on the footer / VNC page.
 
 **Non-goals (v1 — explicitly out; ARCHITECTURE §9, decision 12):**
@@ -149,7 +155,7 @@ of `packages/media-library-contract/src/` (`model.ts`, `methods.ts`, `client.ts`
 | `start` | — | `InstanceState` | **(revised 2026-07-11)** Power on **and wake**: lifecycle sets `spec.suspended: false` **and `spec.replicas: 1`** (single-writer v1) — the same call is the **manual wake from sleep**. ~~Never touches `spec.replicas` (activator-owned)~~ |
 | `stop` | — | `InstanceState` | Set the power gate (lifecycle sets `spec.suspended: true`); ~~the activator stops waking and~~ the operator scales to 0 (the pod's `preStop` owns the graceful drain, ARCHITECTURE §5) |
 | `reset` | — | `InstanceState` | Restart the pod (patch desired-state → reconcile; never live surgery, §9) |
-| `reloginAnkiWeb` | `{ username: string; password: string }` | `{ ok: true }` or error `AUTH_FAILED` | Mint hkey, deliver to pod (§7) |
+| ~~`reloginAnkiWeb`~~ | — | — | **REMOVED in v1** (top banner) — no credential mutation exists; login is in-Anki over VNC (§7) |
 
 `InstanceState` (interface shape proposed; the **status enum is canonical in
 [contracts.md §11](./contracts.md)** — pinned 2026-07-11, do not diverge):
@@ -273,8 +279,9 @@ when **on** (`Running`), and the VNC page itself performs **no wake** (§6.4).
 ~~disabled when off or asleep — from sleep the user presses Start first~~ ~~if Suspended, the
 VNC page itself drives the wake~~
 
-**F. AnkiWeb credentials.** The `ReloginForm` (§7), collapsed by default with a "Sign in to
-AnkiWeb / update credentials" affordance.
+**F. AnkiWeb sign-in note.** No credential form (removed in v1 — top banner). Show static help
+text: "Sign in to AnkiWeb inside Anki (open the remote desktop and click Sync). Your sign-in is
+remembered until you delete the instance."
 
 **G. Footer.** `SourceCodeLink` (§9).
 
@@ -414,58 +421,25 @@ coupling. VNC-password auth stays off. Never put the raw `sid` in a URL (unchang
 
 ---
 
-## 7. AnkiWeb credentials (re-login) flow
+## 7. AnkiWeb sign-in (user-managed over VNC)
 
-Context: the ci-buddy add-on locks Preferences, so the pod has **no in-GUI login surface**
-(`../REQUIREMENTS.md` §A, §B). The control plane holds the AnkiWeb password, mints the hkey, and
-delivers only the hkey to the pod (ARCHITECTURE §6; `../REQUIREMENTS.md` §B.1). This form is
-that control-plane entry point.
+> **The re-login form/flow is REMOVED in v1 (2026-07, top banner).** There is no
+> `ReloginForm`, no `reloginAnkiWeb` mutation, no password custody in the dashboard, and no
+> "credentials active within a minute" copy. The user signs into AnkiWeb **inside Anki**:
+> open the remote desktop (§6) and click the toolbar **Sync** button — Anki shows its stock
+> login prompt. The sign-in persists on the instance's PVC (like desktop Anki) across
+> restarts/sleep, and is wiped only when the instance is deleted.
 
-### 7.1 The form (`ReloginForm`)
-
-- Fields: `username` (email) + `password`. Standard, accessible form (`<label>`, `type="password"`,
-  `autoComplete="current-password"`, `role="form"` region with an `aria-labelledby` heading).
-- Submit → `lifecycle.reloginAnkiWeb({ username, password })` over the oRPC control plane.
-  This is an **authed mutation**; use the cookie-BFF CSRF seam (`authClient.mutate` /
-  `getCsrfToken` — see the note in `apps/web/src/lib/auth.ts` lines 171–179; re-export the
-  wrapper when this, the first real authed mutation, lands).
-- **Password custody.** The password is held only in local component state for the duration of
-  the request and **cleared on submit success/failure** (`setPassword("")`). Never persist it
-  (no `localStorage`/`sessionStorage`), never log it, never round-trip it back from the server,
-  never place it in the URL. The password never enters the pod (ARCHITECTURE §6).
-- Transport must be TLS (it already is — same origin as `/ws`). Note in code that this request
-  carries a plaintext password to the trusted control plane by design.
-
-### 7.2 Post-submit message (decision 10)
-
-On success show the fixed message: **"Credentials active within a minute."** (ARCHITECTURE §6,
-decision 10 "Option 1"). Keep the string in a single constant. Show `updatedAt`/username
-afterward for confidence.
-
-> **Hosted v1 mechanism note (2026-07-11 — requirements-lifecycle-service §6.3):** pickup is
-> **restart-based** — if the pod is running, the lifecycle service bumps `spec.restartedAt`
-> after writing the Secret, so the user may see their Anki restart (~30–60s). The ≤1-minute
-> promise still holds; the tooltip rationale should mention the restart rather than the (built
-> but unused) live file-poll path.
-
-### 7.3 States
-
-- In flight: disable inputs, `Spinner`, "Signing in to AnkiWeb…".
-- `AUTH_FAILED` (bad AnkiWeb creds): inline error under the form ("AnkiWeb rejected these
-  credentials — check your username and password"). Do not clear the username; **do** clear the
-  password.
-- `SERVICE_UNAVAILABLE`/`TIMEOUT`: toast + retry affordance.
-
-### 7.4 Surfacing sync `auth_failed` guidance
+### 7.1 Surfacing sync `auth_failed` guidance
 
 When `getInstance().lastSyncAuthFailed` is true (the pod's MCP sync reported
-`code="auth_failed"`, propagated control-plane-side — ci-buddy `../REQUIREMENTS.md` §B.7), show
+`code="auth_failed"`, propagated control-plane-side), show
 a **persistent alert** on the instance panel (amber alert block, `role="alert"`):
-"Your AnkiWeb sign-in expired or was rejected. Sync is paused. Sign in again below." with a
-button that expands/scrolls to `ReloginForm`. Clear the alert once a subsequent `getInstance`
-reports the flag false. Explain (help text) that a successful re-login takes effect within a
-minute and the LLM's sync will auto-retry (decision 10 — the `auth_failed` payload carries a
-~60s retry hint; the window is meant to be invisible to the LLM).
+"Your AnkiWeb sign-in expired or was rejected. Sync is paused. Open the remote desktop and
+sign in to AnkiWeb inside Anki (click Sync)." with a button that links to the VNC page (§6).
+Clear the alert once a subsequent `getInstance` reports the flag false. Explain (help text)
+that after signing in over VNC, the LLM's sync will auto-retry (the `auth_failed` payload
+carries a retry hint).
 
 ---
 
@@ -565,12 +539,9 @@ Mock the transport at the library boundary — `vi.mock("@orpc-ws/react", …)` 
 3. `ResetButton`: opens the confirm `Dialog`; confirm calls `reset()`; cancel/close does not.
 4. Create CTA shows only when `getInstance()` is `null`; delete lives in the danger zone with
    its own confirm.
-5. `ReloginForm`: submit calls `reloginAnkiWeb` with typed values; on success shows the exact
-   "Credentials active within a minute." string and **password state is cleared**; `AUTH_FAILED`
-   shows the inline error and clears password but keeps username; password never written to
-   `localStorage`/`sessionStorage` (assert storage untouched).
-6. `auth_failed` guidance alert appears when `lastSyncAuthFailed` is true and clears when false.
-7. `VncViewport`: a ticket is minted (via the `apps/api` seam) **before** RFB is constructed
+5. `auth_failed` guidance alert appears when `lastSyncAuthFailed` is true, links to the VNC
+   page, and clears when false. (No `ReloginForm` tests — the form was removed in v1.)
+6. `VncViewport`: a ticket is minted (via the `apps/api` seam) **before** RFB is constructed
    with the same-origin `getVncWsUrl()`; `disconnect()` called on unmount; unclean `disconnect`
    triggers the backoff/reconnect path with a **fresh ticket per attempt** (mock the `RFB`
    class); a wake exceeding the wake budget resolves to Error, not an infinite spinner.
@@ -633,9 +604,10 @@ can't provide.
 - [ ] Reconnect with capped backoff on unclean disconnect (fresh ticket per attempt);
       re-checks status and stops (no auto-wake) if the instance went to sleep/off.
 - [ ] Clipboard wired best-effort with a user-facing note.
-- [ ] Re-login form: `reloginAnkiWeb` via CSRF-authed mutation; password cleared after request,
-      never persisted/logged/in-URL; "Credentials active within a minute." shown on success.
-- [ ] `auth_failed` guidance alert surfaces and clears from `lastSyncAuthFailed`.
+- [ ] No AnkiWeb credential surface anywhere (removed in v1 — top banner); the §5.1.F static
+      sign-in-over-VNC help text is present.
+- [ ] `auth_failed` guidance alert surfaces and clears from `lastSyncAuthFailed`, pointing at
+      the VNC page (§7.1).
 - [ ] Error state shows lifecycle `message` + support link + contextual Retry.
 - [ ] AGPL "Source code" link on the VNC page and footer → `getSourceCodeUrl()`.
 - [ ] `config.ts` getters + `AppConfig` + `config.js`/`.env.example` updated for `VNC_WS_URL`

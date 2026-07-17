@@ -99,7 +99,7 @@ def _reset_shim_ref():
 # --------------------------------------------------------------------------- #
 
 
-def test_apply_menu_locks_hides_actions_and_file_menu(monkeypatch):
+def test_apply_menu_locks_hides_actions_and_keeps_file_menu(monkeypatch):
     form = make_form_with_all_lock_targets()
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
 
@@ -109,8 +109,17 @@ def test_apply_menu_locks_hides_actions_and_file_menu(monkeypatch):
     assert form.actionPreferences.visible is False
     assert form.actionPreferences.enabled is True
     assert form.action_check_for_updates.visible is False
-    # the File menu is hidden via its menuAction (a QMenu is not a QAction)
-    assert form.menuCol.menuAction().visible is False
+    # the v0.7.0 per-item File locks are hidden by default...
+    assert form.actionImport.visible is False
+    assert form.actionExport.visible is False
+    assert form.action_create_backup.visible is False
+    assert form.action_open_backup.visible is False
+    assert form.actionExit.visible is False
+    # ...so the File menu itself and Switch Profile stay usable by default
+    # (multi-profile support): net result is a File menu with only Switch
+    # Profile.
+    assert form.menuCol.menuAction().visible is True
+    assert form.actionSwitchProfile.visible is True
     # default-unlocked actions stay untouched
     assert form.actionNoteTypes.visible is True
     assert form.actionFullDatabaseCheck.visible is True
@@ -120,12 +129,24 @@ def test_apply_menu_locks_disable_mode_greys_out(monkeypatch):
     form = make_form_with_all_lock_targets()
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
 
-    locks.apply_menu_locks(core.merge_config({"hide_vs_disable": "disable"}))
+    locks.apply_menu_locks(
+        core.merge_config({"hide_vs_disable": "disable", "lock_file_menu": True})
+    )
 
     assert form.actionPreferences.enabled is False
     assert form.actionPreferences.visible is True
     assert form.menuCol.menuAction().enabled is False
     assert form.menuCol.menuAction().visible is True
+
+
+def test_apply_menu_locks_file_menu_lock_still_gateable_on(monkeypatch):
+    # The whole-menu gate stays implemented — only the default changed.
+    form = make_form_with_all_lock_targets()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
+
+    locks.apply_menu_locks(core.merge_config({"lock_file_menu": True}))
+
+    assert form.menuCol.menuAction().visible is False
 
 
 def test_apply_menu_locks_gates_off_leave_targets_alone(monkeypatch):
@@ -134,12 +155,12 @@ def test_apply_menu_locks_gates_off_leave_targets_alone(monkeypatch):
 
     locks.apply_menu_locks(
         core.merge_config(
-            {"lock_check_for_updates": False, "lock_file_menu": False}
+            {"lock_check_for_updates": False, "lock_export": False}
         )
     )
 
     assert form.action_check_for_updates.visible is True
-    assert form.menuCol.menuAction().visible is True
+    assert form.actionExport.visible is True
 
 
 def test_apply_menu_locks_missing_attrs_warn_not_crash(monkeypatch, capsys):
@@ -148,7 +169,7 @@ def test_apply_menu_locks_missing_attrs_warn_not_crash(monkeypatch, capsys):
     form = types.SimpleNamespace()
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
 
-    locks.apply_menu_locks(core.merge_config({}))
+    locks.apply_menu_locks(core.merge_config({"lock_file_menu": True}))
 
     out = capsys.readouterr().out
     # e.g. action_check_for_updates only exists on 26.05+ — warned, skipped
@@ -164,7 +185,7 @@ def test_apply_menu_locks_menu_without_menu_action_warns(monkeypatch, capsys):
     form.menuCol = object()
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
 
-    locks.apply_menu_locks(core.merge_config({}))
+    locks.apply_menu_locks(core.merge_config({"lock_file_menu": True}))
 
     assert "menuCol" in capsys.readouterr().out
 
@@ -180,7 +201,7 @@ def test_apply_menu_locks_reshaped_action_warns_and_continues(
     form.actionPreferences = object()
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
 
-    locks.apply_menu_locks(core.merge_config({}))
+    locks.apply_menu_locks(core.merge_config({"lock_file_menu": True}))
 
     out = capsys.readouterr().out
     assert "actionPreferences" in out
@@ -204,7 +225,7 @@ def test_apply_menu_locks_menu_action_not_action_shaped_warns(
     form.menuCol = WeirdMenu()
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=form))
 
-    locks.apply_menu_locks(core.merge_config({}))
+    locks.apply_menu_locks(core.merge_config({"lock_file_menu": True}))
 
     out = capsys.readouterr().out
     assert "menuCol" in out
@@ -217,6 +238,191 @@ def test_apply_menu_locks_menu_action_not_action_shaped_warns(
 def test_apply_menu_locks_no_form_is_noop(monkeypatch):
     install_fake_aqt(monkeypatch, types.SimpleNamespace(form=None))
     locks.apply_menu_locks(core.merge_config({}))  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# Seam 9 — profile-manager screen lockdown
+# --------------------------------------------------------------------------- #
+
+#: The buttons ci-buddy must never touch on the profile-manager screen
+#: (users manage their own profiles — product decision).
+_PM_KEPT_BUTTONS = ("login", "add", "rename", "delete_2")
+
+
+def make_profile_form():
+    """A fake ``mw.profileForm`` carrying every profiles.ui button — the locked
+    ones and the kept ones."""
+    form = types.SimpleNamespace()
+    for attr in core.PROFILE_MANAGER_LOCK_MAP.values():
+        setattr(form, attr, FakeAction())
+    for attr in _PM_KEPT_BUTTONS:
+        setattr(form, attr, FakeAction())
+    return form
+
+
+class FakeProfileMw:
+    """A fake ``mw`` whose ``showProfileManager`` rebuilds ``profileForm`` from
+    scratch on every call — exactly what aqt's ``AnkiQt.showProfileManager``
+    does (main.py assigns a fresh ``Ui_MainWindow`` each showing)."""
+
+    def __init__(self):
+        self.profileForm = None
+        self.show_calls = 0
+
+    def showProfileManager(self):
+        self.show_calls += 1
+        self.profileForm = make_profile_form()
+
+
+def test_apply_profile_manager_locks_hides_dangerous_buttons(monkeypatch):
+    form = make_profile_form()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(profileForm=form))
+
+    locks.apply_profile_manager_locks(core.merge_config({}))
+
+    # dangerous buttons hidden (hide mode), not disabled
+    assert form.openBackup.visible is False
+    assert form.quit.visible is False
+    assert form.downgrade_button.visible is False
+    assert form.openBackup.enabled is True
+    # profile-management buttons are never touched
+    for attr in _PM_KEPT_BUTTONS:
+        assert getattr(form, attr).visible is True
+        assert getattr(form, attr).enabled is True
+
+
+def test_apply_profile_manager_locks_disable_mode_greys_out(monkeypatch):
+    form = make_profile_form()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(profileForm=form))
+
+    locks.apply_profile_manager_locks(
+        core.merge_config({"hide_vs_disable": "disable"})
+    )
+
+    assert form.quit.enabled is False
+    assert form.quit.visible is True
+
+
+def test_apply_profile_manager_locks_gates_off_leave_buttons_alone(monkeypatch):
+    form = make_profile_form()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(profileForm=form))
+
+    locks.apply_profile_manager_locks(
+        core.merge_config({"lock_profile_manager_quit": False})
+    )
+
+    assert form.quit.visible is True
+    assert form.openBackup.visible is False  # other gates still applied
+
+
+def test_apply_profile_manager_locks_missing_button_warns_not_crash(
+    monkeypatch, capsys
+):
+    # A future profiles.ui that renamed a button: logged skip, other locks
+    # still applied — never an AttributeError crash.
+    form = make_profile_form()
+    del form.openBackup
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(profileForm=form))
+
+    locks.apply_profile_manager_locks(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "openBackup" in out
+    assert "lock skipped" in out
+    assert form.quit.visible is False  # remaining locks still applied
+
+
+def test_apply_profile_manager_locks_reshaped_button_warns_and_continues(
+    monkeypatch, capsys
+):
+    # A button attr that exists but is no longer button-shaped is a logged
+    # skip too — per-item, so the remaining locks still apply.
+    form = make_profile_form()
+    form.quit = object()
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(profileForm=form))
+
+    locks.apply_profile_manager_locks(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "quit" in out
+    assert "lock skipped" in out
+    assert form.openBackup.visible is False
+    assert form.downgrade_button.visible is False
+
+
+def test_apply_profile_manager_locks_no_form_is_noop(monkeypatch):
+    install_fake_aqt(monkeypatch, types.SimpleNamespace(profileForm=None))
+    locks.apply_profile_manager_locks(core.merge_config({}))  # must not raise
+
+
+def test_install_profile_manager_lock_covers_every_showing(monkeypatch):
+    # aqt rebuilds the profile-manager form fresh on EVERY showProfileManager
+    # call (main.py) — the wrap must lock the new buttons each time, both for
+    # the startup picker (first call) and File → Switch Profile (later calls).
+    mw = FakeProfileMw()
+    install_fake_aqt(monkeypatch, mw)
+
+    locks.install_profile_manager_lock(core.merge_config({}))
+
+    # first showing (startup picker path)
+    mw.showProfileManager()
+    first_form = mw.profileForm
+    assert mw.show_calls == 1  # original still ran
+    assert first_form.openBackup.visible is False
+    assert first_form.quit.visible is False
+    assert first_form.downgrade_button.visible is False
+    assert first_form.login.visible is True
+
+    # second showing (File → Switch Profile) builds a FRESH form — the locks
+    # must hold there too, or the seam silently unlocks.
+    mw.showProfileManager()
+    second_form = mw.profileForm
+    assert second_form is not first_form
+    assert second_form.openBackup.visible is False
+    assert second_form.quit.visible is False
+    assert second_form.downgrade_button.visible is False
+    assert second_form.login.visible is True
+
+
+def test_install_profile_manager_lock_is_idempotent(monkeypatch):
+    mw = FakeProfileMw()
+    install_fake_aqt(monkeypatch, mw)
+
+    locks.install_profile_manager_lock(core.merge_config({}))
+    wrapped = mw.showProfileManager
+    # Second install must be a no-op: same wrapper, not a wrap-of-a-wrap.
+    locks.install_profile_manager_lock(core.merge_config({}))
+    assert mw.showProfileManager is wrapped
+
+    mw.showProfileManager()
+    assert mw.show_calls == 1  # original ran exactly once per call
+
+
+def test_install_profile_manager_lock_missing_method_warns_not_crash(
+    monkeypatch, capsys
+):
+    # A future aqt without showProfileManager: logged skip — the buttons then
+    # stay visible (fail open), never a startup failure.
+    install_fake_aqt(monkeypatch, types.SimpleNamespace())
+
+    locks.install_profile_manager_lock(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "showProfileManager" in out
+    assert "profile-manager lock skipped" in out
+
+
+def test_install_profile_manager_lock_locks_preexisting_form(monkeypatch):
+    # Defensive path: if a form already exists at install time it is locked
+    # immediately, not only on the next showing.
+    mw = FakeProfileMw()
+    mw.profileForm = make_profile_form()
+    install_fake_aqt(monkeypatch, mw)
+
+    locks.install_profile_manager_lock(core.merge_config({}))
+
+    assert mw.profileForm.openBackup.visible is False
+    assert mw.profileForm.login.visible is True
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +449,7 @@ def test_write_config_shim_drops_writes(monkeypatch):
 
     # Producer side of the cross-module contract: the shim must expose the
     # genuine original on itself under core.ORIGINAL_WRITE_CONFIG_ATTR — this is
-    # what provisioning._real_write_config recovers to persist a sibling
+    # what provisioners._real_write_config recovers to persist a sibling
     # add-on's config despite the write lock. Calling the exposed original must
     # actually persist (not drop) a write.
     exposed = getattr(mgr.writeConfig, core.ORIGINAL_WRITE_CONFIG_ATTR, None)
@@ -655,6 +861,54 @@ def test_register_gate_off_leaves_update_checks_alone(monkeypatch):
     )
 
     assert pm.calls == []
+
+
+def test_register_installs_profile_manager_lock_at_load_time(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    mw = sys.modules["aqt"].mw
+    mw.profileForm = None
+
+    def fake_show():
+        mw.profileForm = make_profile_form()
+
+    mw.showProfileManager = fake_show
+
+    locks.register(core.merge_config(_REGISTER_BASE))
+
+    # The wrap is installed immediately at register (add-on load) time — NOT
+    # deferred to a hook: the startup picker (multiple profiles, none
+    # auto-loaded) shows inside setupProfile, BEFORE main_window_did_init
+    # fires, so a hook-time install would miss the very first showing.
+    assert mw.showProfileManager is not fake_show
+    mw.showProfileManager()
+    assert mw.profileForm.openBackup.visible is False
+    assert mw.profileForm.quit.visible is False
+    assert mw.profileForm.downgrade_button.visible is False
+    assert mw.profileForm.login.visible is True
+
+
+def test_register_all_gates_off_leaves_profile_manager_alone(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    mw = sys.modules["aqt"].mw
+
+    def fake_show():
+        pass
+
+    mw.showProfileManager = fake_show
+
+    locks.register(
+        core.merge_config(
+            dict(
+                _REGISTER_BASE,
+                lock_profile_manager_open_backup=False,
+                lock_profile_manager_quit=False,
+                lock_profile_manager_downgrade=False,
+            )
+        )
+    )
+
+    # every Seam-9 gate off → showProfileManager is not wrapped at all
+    assert mw.showProfileManager is fake_show
 
 
 def _add_fake_about_to_register_env(monkeypatch):

@@ -4,7 +4,7 @@ import sys
 import types
 
 import ci_buddy
-from ci_buddy import locks, provisioning
+from ci_buddy import locks, provisioners
 
 
 def test_load_registers_once(monkeypatch):
@@ -13,7 +13,7 @@ def test_load_registers_once(monkeypatch):
         locks, "register", lambda config: calls.__setitem__("locks", calls["locks"] + 1)
     )
     monkeypatch.setattr(
-        provisioning,
+        provisioners,
         "register",
         lambda config: calls.__setitem__("prov", calls["prov"] + 1),
     )

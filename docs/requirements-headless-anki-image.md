@@ -39,7 +39,7 @@ straight into `/data/addons21` — which collides with the PVC mount (see §4). 
 
 ### 1.2 What the `hosted` variant adds over `x11-vnc`
 
-1. Two baked add-ons: **`ci_buddy`** (GUI lock + sync-credential injection,
+1. Two baked add-ons: **`ci_buddy`** (GUI lock + managed-config provisioners,
    [../REQUIREMENTS.md](../REQUIREMENTS.md)) and the **AnkiMCP server add-on** (MCP transport +
    sync executor).
 2. **websockify + noVNC** static assets, to serve VNC-in-the-browser (ARCHITECTURE §9).
@@ -66,8 +66,8 @@ Layered on `x11-vnc` (which already brings `python:3.12-slim`, `aqt==26.5`, Qt6/
 | Component | Source / pin | Why | Notes |
 |---|---|---|---|
 | **Anki** | `aqt==26.5` (inherited from `base`) | The app | Pin matches ci-buddy target; do not bump silently |
-| **ci_buddy add-on** | baked from this repo (`.ankiaddon` or raw `ci_buddy/`) | GUI lock + hkey injection | Hosted config overrides applied (§3.4) |
-| **AnkiMCP server add-on** | baked from `anki-mcp-server-addon` | MCP transport + sync executor | Owns `sync()`; ci-buddy only seeds the credential ([../REQUIREMENTS.md](../REQUIREMENTS.md) §1) |
+| **ci_buddy add-on** | baked from this repo (`.ankiaddon` or raw `ci_buddy/`) | GUI lock + managed-config provisioners | Hosted config overrides applied (§3.4); never touches sync credentials ([../REQUIREMENTS.md](../REQUIREMENTS.md) Part B) |
+| **AnkiMCP server add-on** | baked from `anki-mcp-server-addon` | MCP transport + sync executor | Owns `sync()` ([../REQUIREMENTS.md](../REQUIREMENTS.md) §1) |
 | **rclone** | pinned release (e.g. `v1.6x.x`), verify latest at build | B2 media mount (ARCHITECTURE §4) | Only used in the **internal-mount** variant (§5.3); still installed in both for `rclone rc` drain client |
 | **websockify** | pip or distro pkg, pinned | WS↔RFB proxy for noVNC | `websockify --web <novnc> 6080 localhost:5900` |
 | **noVNC** | pinned release, static assets in image (`/opt/novnc`) | Browser VNC client (ARCHITECTURE §9) | Self-hosted; CSP-friendly (no CDN) |
@@ -138,26 +138,22 @@ This is the same shape as an OS package manager overlaying `/usr` while leaving 
 
 ### 3.4 Config for managed add-ons is **image-owned**
 
-The hosted image must flip ci-buddy's conservative ship-defaults to hosted values
-([../REQUIREMENTS.md](../REQUIREMENTS.md) §4, Seam 5 warning). Bake a `config.json` in the
-stashed `ci_buddy/` with:
+The hosted image bakes a `config.json` in the stashed `ci_buddy/` with
+([../REQUIREMENTS.md](../REQUIREMENTS.md) §4):
 
 ```json
 {
   "strip_sync_link": false,
-  "disable_native_auto_sync": false,
-  "provisioning_enabled": true,
-  "credentials_path": "/run/ankimcp/sync-credentials.json",
-  "clear_key_on_close": true
+  "disable_native_auto_sync": false
 }
 ```
 
-> ⚠️ **Deliberate deviation from ci-buddy's hosted-default table.** ARCHITECTURE **decision 14
-> supersedes** [../REQUIREMENTS.md](../REQUIREMENTS.md) §B.6/Seam 5: **native auto-sync stays ON**
+> **Same as the ship defaults** (ARCHITECTURE decision 14): **native auto-sync stays ON**
 > and the **sync link stays visible** — the pod behaves like a stock desktop
-> (ARCHITECTURE §5). So `strip_sync_link` and `disable_native_auto_sync` are **`false`** here,
-> *opposite* the ci-buddy doc's "hosted → true". `provisioning_enabled` is **`true`** (the pod
-> gets its hkey from the mounted Secret via ci-buddy). See §9.
+> (ARCHITECTURE §5). There are no credential-provisioning keys any more: the channel was
+> **removed in v1** ([../REQUIREMENTS.md](../REQUIREMENTS.md) Part B) — the user logs into
+> AnkiWeb manually over VNC (the sync link is the login surface) and the login persists
+> on the PVC. See §9.
 
 Because ci-buddy neuters `writeConfig` at runtime, `meta.json` config never changes after boot.
 To guarantee the baked values win, the overlay step (§3.3) **overwrites `config.json` every
@@ -192,7 +188,7 @@ one rule: **SQLite + add-ons on the PVC (never FUSE); media blobs on the rclone/
 | Path (default) | Env var | Backing store | Contents | Notes |
 |---|---|---|---|---|
 | `/data` | `ANKI_BASE` | **PVC** (Hetzner Cloud Volume, 10GB — min volume size) | Anki base dir (`anki -b /data`) | RWOP, one pod only (ARCHITECTURE §3) |
-| `/data/prefs21.db` (+`-wal`/`-shm`) | — | PVC | Profile prefs, **holds hkey** after injection | Credential-bearing at rest ([../REQUIREMENTS.md](../REQUIREMENTS.md) §B.5) |
+| `/data/prefs21.db` (+`-wal`/`-shm`) | — | PVC | Profile prefs, **holds hkey** after the user's manual AnkiWeb login | Credential-bearing at rest, like desktop Anki; wiped only with the PVC ([../REQUIREMENTS.md](../REQUIREMENTS.md) Part B) |
 | `/data/addons21/` | — | PVC | `ci_buddy/`, `ankimcp/` (+ meta.json, user_files) | Reconciled by overlay (§3.3) |
 | `/data/<profile>/collection.anki2` (+wal/shm) | `ANKI_PROFILE` (dflt `User 1`) | PVC | Main SQLite DB | **never FUSE** |
 | `/data/<profile>/collection.media.db2` (+wal/shm) | — | PVC | Media-index SQLite (mmaps `-shm`) | **never FUSE** |
@@ -200,8 +196,7 @@ one rule: **SQLite + add-ons on the PVC (never FUSE); media blobs on the rclone/
 | `/data/<profile>/media.trash/` → **symlink** | — | → rclone mount | Deleted-media staging | Symlink target = `${MEDIA_MOUNT}/media.trash` — **same mount** as above |
 | `/data/.rclone-cache/` | `RCLONE_CACHE_DIR` | **PVC** | rclone VFS write-back + LRU read cache | LRU-capped (§5.2); durability of un-flushed writes (ARCHITECTURE §4) |
 | `/media/b2` | `MEDIA_MOUNT` | rclone FUSE (internal) **or** CSI volume (external) | mount root holding `collection.media/` + `media.trash/` | Provided per §5.3 |
-| `/run/ankimcp/sync-credentials.json` | `CI_BUDDY_CREDENTIALS_PATH` | Secret mount / emptyDir | hkey delivery ([../REQUIREMENTS.md](../REQUIREMENTS.md) §B.2) | `0400`, owned by Anki uid; whole-volume mount, **never `subPath`** |
-| `/run/ankimcp/tunnel-credentials.json` | — (add-on config `hosted_credentials_path`, §3.4) | same Secret mount (second data key — added 2026-07-11) | tunnel bearer token + `tunnelUrl` for the AnkiMCP add-on's outbound tunnel connection ([contracts.md §8c](./contracts.md)) | same volume/perms as above; anki container only, never `envFrom`'d |
+| `/run/ankimcp/tunnel-credentials.json` | — (add-on config `hosted_credentials_path`, §3.4) | Secret mount | tunnel bearer token + `tunnelUrl` for the AnkiMCP add-on's outbound tunnel connection ([contracts.md §8c](./contracts.md)) | `0400`, owned by Anki uid; whole-volume mount, **never `subPath`**; anki container only, never `envFrom`'d. (The former `sync-credentials.json` data key was **removed in v1** — [../REQUIREMENTS.md](../REQUIREMENTS.md) Part B.) |
 | `/home/anki`, `/tmp`, `/tmp/.X11-unix` | — | image / emptyDir | Qt/X runtime, X socket | writable; keep off the PVC |
 
 ### 4.2 The two symlinks are load-bearing (ARCHITECTURE §4)
@@ -505,9 +500,7 @@ websockify, rclone(internal), and Anki all run fine as an unprivileged user prov
 ### 8.2 No ServiceAccount token, no k8s creds in the main container
 
 `automountServiceAccountToken: false` (operator-set). The Anki container holds **zero Kubernetes
-credentials** (ARCHITECTURE §3, §10 Layer 2; [../REQUIREMENTS.md](../REQUIREMENTS.md) §C.2). Any
-Secret-watching sidecar (if used for fast credential delivery) keeps its own scoped Role — never
-in this container.
+credentials** (ARCHITECTURE §3, §10 Layer 2; [../REQUIREMENTS.md](../REQUIREMENTS.md) §C).
 
 ### 8.3 Resource limits (defaults; capacity is Open per §12 item 10)
 
@@ -545,15 +538,15 @@ renders the sidecar via `--media-mount-mode=sidecar` (default).
 
 - **Native auto-sync stays ON** — profile-open and profile-close sync run as in stock desktop
   Anki. No config flips vs stock (this is why §3.4 sets `disable_native_auto_sync: false` and
-  `strip_sync_link: false`, **overriding** ci-buddy's own hosted-default recommendation).
-- The MCP `sync()` tool coexists (single sync *executor* = the AnkiMCP add-on;
-  [../REQUIREMENTS.md](../REQUIREMENTS.md) §B.6). ci-buddy never triggers sync itself.
-- **Sync credentials** arrive as the **hkey** via the mounted Secret at
-  `${CI_BUDDY_CREDENTIALS_PATH}`; ci-buddy injects it into the profile
-  ([../REQUIREMENTS.md](../REQUIREMENTS.md) §B). The **password never enters the pod**
-  (ARCHITECTURE §6). The image's only responsibility here is to **mount the Secret as a whole
-  volume** (never `subPath` — subPath never refreshes) with mode/owner readable by the Anki uid.
-  Reference only; delivery is the operator's job.
+  `strip_sync_link: false`).
+- The MCP `sync()` tool coexists (single sync *executor* = the AnkiMCP add-on).
+  ci-buddy never triggers sync itself.
+- **Sync credentials: user-managed, not delivered.** The credential-provisioning channel was
+  **removed in v1** ([../REQUIREMENTS.md](../REQUIREMENTS.md) Part B; ARCHITECTURE §6): the user
+  logs into AnkiWeb manually inside Anki over VNC (the toolbar sync link is the login surface),
+  the login persists in `prefs21.db` on the PVC across restarts/sleep, and it is wiped only when
+  the instance + PVC are deleted. The image mounts no sync-credentials file and ci-buddy never
+  touches sync credentials.
 - **B2 is not sync** — it is the pod-device's persistent local disk (ARCHITECTURE §5, decision
   13). Cross-device truth is AnkiWeb/the sync server.
 
@@ -591,10 +584,8 @@ services:
       B2_BUCKET: testbucket
       B2_PREFIX: alice
       ANKI_PROFILE: "User 1"
-      CI_BUDDY_CREDENTIALS_PATH: /run/ankimcp/sync-credentials.json
     volumes:
       - "./_pvc:/data"                             # stands in for the per-user PVC
-      - "./sync-credentials.json:/run/ankimcp/sync-credentials.json:ro"
     ports:
       - "5900:5900"    # VNC
       - "6080:6080"    # noVNC (open http://localhost:6080/vnc.html)
@@ -665,7 +656,6 @@ predicate (§7.3) reaches zero, and the file is present in the bucket before exi
 | `RCLONE_CACHE_DIR` | `/data/.rclone-cache` | VFS cache on the PVC |
 | `RCLONE_CACHE_MAX` | `6G` | VFS cache LRU size cap (default 6G on the 10GB PVC — contracts.md §6) |
 | `RCLONE_WRITE_BACK` | `5s` | VFS write-back delay |
-| `CI_BUDDY_CREDENTIALS_PATH` | `/run/ankimcp/sync-credentials.json` | hkey delivery file |
 | `ANKI_QUIT_TIMEOUT` | `60s` | preStop clean-quit bound (§7.1) |
 | `RCLONE_DRAIN_TIMEOUT` | `45s` | preStop drain bound (§7.3) |
 | `RCLONE_RC_ADDR` | `127.0.0.1:5572` | rclone rc (localhost only) |
@@ -687,9 +677,9 @@ add-on's outbound tunnel connection, [contracts.md §7](./contracts.md)), **5572
       (`/opt/ankimcp/addons/`), **not** onto the PVC mount path.
 - [ ] **Managed add-on overlay** reconciles code + `config.json` onto `/data/addons21` on start,
       version-gated, **preserving `user_files/`**; upgrades land on image bump.
-- [ ] ci-buddy hosted `config.json`: `provisioning_enabled=true`,
-      `disable_native_auto_sync=false`, `strip_sync_link=false` (per decision 14 — **native
-      sync ON**), `credentials_path` set.
+- [ ] ci-buddy hosted `config.json`: `disable_native_auto_sync=false`, `strip_sync_link=false`
+      (per decision 14 — **native sync ON**); no credential-provisioning keys (removed in v1,
+      [../REQUIREMENTS.md](../REQUIREMENTS.md) Part B).
 - [ ] Paths match ARCHITECTURE §4: SQLite + addons21 + rclone cache on the **PVC**;
       `collection.media/` + `media.trash/` symlinked into **one** rclone mount; **no SQLite on
       FUSE**.

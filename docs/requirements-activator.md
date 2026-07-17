@@ -338,8 +338,9 @@ Config `HOLD_TIMEOUT` (default **60s** — cold start is pod schedule + image pu
 Anki boot + rclone mount; size generously, see §13.6). On expiry:
 - **MCP-over-HTTP:** respond `503 Service Unavailable` with `Retry-After` and a **JSON-RPC
   error** body (reuse the repo's error-code convention where sensible) whose message tells the
-  LLM client to retry (a structured "retry after N s" is obeyed automatically — same principle
-  as ARCHITECTURE §6's LLM-retryable hkey UX). Do **not** hang forever; a bounded, retryable
+  LLM client to retry (a structured "retry after N s" is obeyed automatically — the
+  retryable-error principle formerly used by ARCHITECTURE decision 10's hkey re-login UX,
+  since removed in v1). Do **not** hang forever; a bounded, retryable
   error beats an indefinitely stalled request.
 - **WebSocket (noVNC):** if the upgrade cannot complete in time, either (a) fail the upgrade
   with `503` before switching protocols, or (b) if already upgraded for UX reasons, send a

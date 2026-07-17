@@ -1,7 +1,7 @@
 {
   "package": "ci_buddy",
-  "name": "ci-buddy — Managed Anki Lock & Sync Provisioning",
-  "human_version": "0.5.0",
+  "name": "ci-buddy — Managed Anki Lock",
+  "human_version": "0.7.0",
   "conflicts": [],
   "mod": 1783658171
 }

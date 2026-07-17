@@ -44,7 +44,7 @@ CR `spec`**; the operator still writes `status.*` only (status subresource, fiel
 | `spec.user` | **lifecycle** (`anki-lifecycle`) | tenant identity = keycloakId; **immutable**, `== metadata.name` |
 | `spec.replicas` (0↔1) | **lifecycle** (`anki-lifecycle`) | wake (dashboard Start / tunnel-triggered ensure-connected) and idle-TTL sleep — the lifecycle service owns the idle TTL in v1 |
 | `spec.suspended` (bool) | **lifecycle** (`anki-lifecycle`) | administrative power gate (dashboard on/off, tier lapse) |
-| `spec.restartedAt` (RFC3339 timestamp) | **lifecycle** (`anki-lifecycle`) | **NEW 2026-07-11** — restart nonce: the operator copies the value into the StatefulSet pod template as an annotation (the `kubectl rollout restart` pattern) → pod recreated, PVC untouched. Used for hkey pickup after AnkiWeb (re)login and for tunnel reconnect/takeover |
+| `spec.restartedAt` (RFC3339 timestamp) | **lifecycle** (`anki-lifecycle`) | **NEW 2026-07-11** — restart nonce: the operator copies the value into the StatefulSet pod template as an annotation (the `kubectl rollout restart` pattern) → pod recreated, PVC untouched. Used for tunnel reconnect/takeover (formerly also hkey pickup — credential channel removed in v1, §8) |
 | data-fate field (e.g. `spec.dataRetention: Delete\|Retain`) | **lifecycle** (`anki-lifecycle`) | **NEW 2026-07-11** — PVC fate on CR delete; the **operator** deletes the PVC (finalizer flow) when the CR is deleted with fate=Delete. Exact field name is owned by the operator spec. The lifecycle service keeps **zero workload-object RBAC verbs** (its Role stays CRs + Secrets only) |
 | `spec.image`, other future toggles | **lifecycle** (`anki-lifecycle`) | image pin, per-addon config |
 | `status.*` | **operator** (`anki-operator`) | via the status subresource only (never bumps generation) |
@@ -158,34 +158,30 @@ exposes — **in v1, only `vnc-ws`** (DECIDED 2026-07-11):
 Not Service ports (localhost-only inside the pod): x11vnc RFB **5900**, rclone rc **5572**.
 AnkiConnect (8765) is **not** exposed in v1.
 
-## 8. Credentials Secret (ci-buddy §B.2 contract)
+## 8. Credentials Secret
+
+> **Sync-credentials channel REMOVED in v1 (2026-07, platform decision).** The former
+> `sync-credentials.json` data key (the ci-buddy hkey contract, old REQUIREMENTS §B.2) is
+> **gone**: the lifecycle service performs no password→hkey exchange and writes no sync
+> credentials, and ci-buddy never touches them. AnkiWeb login is **user-managed over VNC** and
+> persists in `prefs21.db` on the PVC (wiped only with the instance + PVC —
+> [../REQUIREMENTS.md](../REQUIREMENTS.md) Part B). The Secret object remains, carrying only the
+> tunnel token (§8c).
 
 | Aspect | Value |
 |---|---|
 | Secret name | `anki-<keycloakId>` (namespace `anki-instances`) |
 | Written by | **lifecycle service** (the Secret *object*) |
 | Mounted by | **operator** (whole-volume mount, **never `subPath`**, `optional: true`) |
-| Read by | **ci-buddy** add-on in the pod |
+| Read by | **AnkiMCP add-on** in the pod (tunnel token, §8c) |
 | Mount dir | `/run/ankimcp` |
-| Files | `/run/ankimcp/sync-credentials.json` (data key = filename) **+ `/run/ankimcp/tunnel-credentials.json` (second data key, added 2026-07-11 — see §8c below)** |
+| Files | `/run/ankimcp/tunnel-credentials.json` (data key = filename; §8c) |
 | Mode / owner | `defaultMode: 0400` + `fsGroup` = **`10001`** (the image's pinned Anki uid/gid, Dockerfile `ANKI_UID`/`ANKI_GID`), so the unprivileged app can read it |
-| JSON payload | `{ "v": 1, "serial": <int>, "hkey": "…", "endpoint"?: "…", "username"?: "…" }` — full contract in [../REQUIREMENTS.md](../REQUIREMENTS.md) §B.2 |
 
-- **Mounted into the anki container ONLY**, as a file. This Secret holds the hkey and is **never
-  `envFrom`'d into any container** — envFrom'ing it would inject the hkey JSON into the privileged
-  rclone sidecar's environment (the `sync-credentials.json` key **is** a valid env-var name; the
+- **Mounted into the anki container ONLY**, as a file. This Secret holds a bearer token and is
+  **never `envFrom`'d into any container** — envFrom'ing it would inject the token JSON into the
+  privileged rclone sidecar's environment (the data-key filename **is** a valid env-var name; the
   kubelet does **not** skip it). The B2/rclone env creds ride a **separate `-b2` Secret** (§9).
-- **`serial`** is a **monotonic bigint per user**, bumped on every credential write; ci-buddy
-  re-injects only when it increases. Owned by the lifecycle service's DB (see
-  requirements-lifecycle-service §4).
-- **No credential sidecar** ([ARCHITECTURE §6](./ARCHITECTURE.md), decision 9 — supersedes ci-buddy
-  §C.2): plain Secret mount + kubelet ~60s refresh + ci-buddy 1–2s file poll ⇒ rotation lands in
-  ≤ ~1 min with no pod restart. **(2026-07-11 — superseded for hosted v1,
-  [ARCHITECTURE §16.6](./ARCHITECTURE.md):** the ci-buddy live file-poll pickup path stays
-  **built but UNUSED** for hosted v1 — hosted v1 credential pickup = **pod restart via
-  `spec.restartedAt`** (§2; the lifecycle service bumps it after the Secret write when the pod is
-  running; a fresh pod mounts the current Secret at start). The kubelet-refresh + file-poll
-  mechanics above remain true and remain the fallback/upgrade path.**)**
 
 ### 8b. B2/rclone env Secret (`anki-<keycloakId>-b2`)
 
@@ -205,14 +201,15 @@ AnkiConnect (8765) is **not** exposed in v1.
   (e.g. `_ACCOUNT`/`_KEY` instead of `_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`) — `envFrom` is
   backend-agnostic and picks up whatever the lifecycle service writes.
 - **Why a second Secret:** keeping the B2 env creds out of the credentials Secret is what lets the
-  operator `envFrom` them into the privileged sidecar **without** dragging the hkey into that
-  sidecar's environment (§8).
+  operator `envFrom` them into the privileged sidecar **without** dragging the tunnel token into
+  that sidecar's environment (§8).
 
 ### 8c. Tunnel credentials — second data key in `anki-<keycloakId>` (PINNED 2026-07-11)
 
-**DECIDED 2026-07-11 (user).** The credentials Secret `anki-<keycloakId>` (§8) gains a **second
-data key `tunnel-credentials.json`** — same whole-volume mount at `/run/ankimcp`, **anki container
-only, never `envFrom`'d** into any container (same reasoning as the hkey, §8/§8b). It
+**DECIDED 2026-07-11 (user).** The credentials Secret `anki-<keycloakId>` (§8) carries the
+data key `tunnel-credentials.json` — whole-volume mount at `/run/ankimcp`, **anki container
+only, never `envFrom`'d** into any container (§8/§8b). (Originally a *second* key beside
+`sync-credentials.json`; since the sync-credentials removal, §8, it is the only key.) It
 authenticates the pod's baked AnkiMCP add-on to the SaaS **tunnel** service — the MCP door for
 hosted instances ([ARCHITECTURE §16](./ARCHITECTURE.md)).
 
@@ -238,7 +235,7 @@ hosted instances ([ARCHITECTURE §16](./ARCHITECTURE.md)).
   (infra repo) — extended from per-user *paths* to per-user *keys*; **do not invent a second one**.
 - Minted / rotated / revoked by the **lifecycle service** (holds a `writeKeys`+`deleteKeys`
   key-manager credential). The `applicationKey` secret is shown once by B2, written straight into
-  the [credentials delivery](#8-credentials-secret-ci-buddy-b2-contract) location, and never stored
+  the [B2 env Secret](#8b-b2rclone-env-secret-anki-keycloakid-b2), and never stored
   — only the `applicationKeyId` handle is persisted.
 - The B2 endpoint (`s3.eu-central-003.backblazeb2.com` for the S3 backend) must be allowed by the
   namespace egress `CiliumNetworkPolicy` (`toFQDNs`).
@@ -250,8 +247,8 @@ hosted instances ([ARCHITECTURE §16](./ARCHITECTURE.md)).
   is still open, decision #5 below); `envFrom` picks up whatever keys were written.
 - **Secret separation is load-bearing (not cosmetic):** the B2 env creds live in `anki-<keycloakId>-b2`,
   NOT in the credentials Secret `anki-<keycloakId>` (§8). The credentials Secret's
-  `sync-credentials.json` data key **is** a valid env-var name and the kubelet does **not** skip it —
-  so if the sidecar `envFrom`'d the credentials Secret, the hkey JSON would land in the privileged
+  `tunnel-credentials.json` data key **is** a valid env-var name and the kubelet does **not** skip it —
+  so if the sidecar `envFrom`'d the credentials Secret, the token JSON would land in the privileged
   sidecar's environment. The credentials Secret is therefore file-mounted into the anki container only,
   and the sidecar `envFrom`s the `-b2` Secret only.
 

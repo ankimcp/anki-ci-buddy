@@ -4,12 +4,12 @@ Turns Anki into a locked appliance using public ``aqt`` GUI hooks plus a
 ``writeConfig`` monkeypatch (spec §A.2). Collection editing (Add / Browse /
 Study / Decks / Stats / **Manage Note Types**) stays fully usable.
 
-MUST NOT import ``provisioning`` — the two modules are deliberately decoupled.
+MUST NOT import ``provisioners`` — the two modules are deliberately decoupled.
 
 Every hook handler is wrapped so no exception can crash startup or block the
 collection ("fail open for the collection", spec §5).
 
-``aqt`` is imported **lazily** inside the handlers (mirroring provisioning.py) so
+``aqt`` is imported **lazily** inside the handlers (mirroring provisioners.py) so
 ``import ci_buddy.locks`` works without a running Anki and the seam logic is
 unit-testable directly.
 """
@@ -111,6 +111,104 @@ def apply_menu_locks(config: dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seam 9 — profile-manager screen lockdown
+# --------------------------------------------------------------------------- #
+
+
+def apply_profile_manager_locks(config: dict[str, Any]) -> None:
+    """Hide/disable the locked buttons on the profile-manager screen
+    (``mw.profileForm``, built from aqt ``forms/profiles.ui``) — Seam 9.
+
+    Same per-item fail-open contract as ``apply_menu_locks``: each button is
+    locked independently, and a missing/renamed attr — or one that exists but
+    is no longer button-shaped on a future Anki whose ``profiles.ui`` changed —
+    is skipped with a logged warning; the screen then degrades to "buttons
+    visible", never a crash. ``login``/``add``/``rename``/``delete_2`` are
+    never touched (users manage their own profiles).
+    """
+    from aqt import mw  # lazy — keeps this module import-safe for tests
+
+    form = getattr(mw, "profileForm", None)
+    if form is None:
+        return
+
+    hide = core.hide_actions(config)
+    for attr, should_lock in core.profile_manager_lock_plan(config).items():
+        if not should_lock:
+            continue
+        button = getattr(form, attr, None)
+        if not _action_shaped(button):
+            print(
+                f"[ci_buddy] warning: profile-manager button {attr!r} not "
+                "present or not button-shaped on this Anki version "
+                "(lock skipped)"
+            )
+            continue
+        _lock_action(button, hide)
+
+
+def install_profile_manager_lock(config: dict[str, Any]) -> None:
+    """Wrap ``mw.showProfileManager`` so the profile-manager buttons are locked
+    on EVERY showing of the screen (Seam 9).
+
+    TIMING (verified against the 26.05 source, ``qt/aqt/main.py``):
+
+    - ``showProfileManager`` builds the screen **fresh on every call** — it
+      assigns a new ``ProfileManager`` window and a new
+      ``aqt.forms.profiles.Ui_MainWindow`` to ``mw.profileDiag`` /
+      ``mw.profileForm`` (main.py lines 335-336). A one-shot lock would
+      therefore silently unlock on the next showing; the locks must be
+      re-applied per call, hence the wrapper.
+    - The FIRST showing can happen at startup, before ``main_window_did_init``:
+      ``AnkiQt.__init__`` runs ``setupAddons`` (line 212, where this add-on's
+      ``register`` runs) and only afterwards schedules ``on_window_init``
+      (line 234), which calls ``setupProfile`` → ``showProfileManager`` when no
+      profile auto-loads (lines 327-328) and emits ``main_window_did_init``
+      only after that (line 232). So this wrap is installed at ``register()``
+      time — same load-time precedent as Seam 7 — which is guaranteed to be
+      before any showing; a ``main_window_did_init`` hook would be too late.
+    - Every show path goes through ``self.showProfileManager``: startup
+      (main.py 328), File → Switch Profile via
+      ``unloadProfileAndShowProfileManager`` (main.py 604-605, wired at 1424),
+      and the collection-load-failure fallback (main.py 668). All resolve the
+      attribute on the instance at call time, so wrapping the ``mw`` instance
+      attribute covers them all.
+
+    Fail-open: a missing/reshaped ``showProfileManager`` on a future Anki is a
+    logged skip (the buttons then stay visible — never a startup failure), and
+    the lock application inside the wrapper is ``_safe``-wrapped so it can
+    never break the screen itself. Idempotent via the shim marker. If the form
+    somehow already exists when we install (defensive), it is locked
+    immediately too.
+    """
+    from aqt import mw  # lazy — keeps this module import-safe for tests
+
+    original = getattr(mw, "showProfileManager", None)
+    if not callable(original):
+        print(
+            "[ci_buddy] warning: mw.showProfileManager not present or not "
+            "callable on this Anki version (profile-manager lock skipped)"
+        )
+        return
+    if getattr(original, _CI_BUDDY_SHIM_ATTR, False):
+        return  # already installed
+
+    def _locked_show_profile_manager(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        # The screen was just rebuilt from scratch — lock the fresh buttons.
+        _safe(apply_profile_manager_locks)(config)
+        return result
+
+    setattr(_locked_show_profile_manager, _CI_BUDDY_SHIM_ATTR, True)
+    mw.showProfileManager = _locked_show_profile_manager
+
+    # Defensive: if a profile-manager form already exists (it normally cannot
+    # at add-on load time — see TIMING above), lock it now as well.
+    if getattr(mw, "profileForm", None) is not None:
+        _safe(apply_profile_manager_locks)(config)
+
+
+# --------------------------------------------------------------------------- #
 # Seam 2 — filtered dialog guard (belt-and-suspenders)
 # --------------------------------------------------------------------------- #
 
@@ -185,12 +283,12 @@ def install_write_config_shim() -> None:
 
     _blocked_write_config._ci_buddy_shim = True  # type: ignore[attr-defined]
     # Stash the genuine original ON the shim callable as well as in the module
-    # global. This is the decoupled contract provisioning.py relies on: it must
+    # global. This is the decoupled contract provisioners.py relies on: it must
     # durably write ANOTHER add-on's config (AnkiMCP's UI config keys)
     # even after this shim is in place, and it recovers the real writeConfig via
     # this attribute WITHOUT importing locks (the two modules stay decoupled).
     # The attribute name lives in core.ORIGINAL_WRITE_CONFIG_ATTR — the single
-    # source of truth shared with the consumer (provisioning._real_write_config).
+    # source of truth shared with the consumer (provisioners._real_write_config).
     setattr(
         _blocked_write_config,
         core.ORIGINAL_WRITE_CONFIG_ATTR,
@@ -454,6 +552,14 @@ def register(config: dict[str, Any]) -> None:
 
     # Seam 1: menu actions + whole menus, applied once the main window is built.
     gui_hooks.main_window_did_init.append(_safe(lambda: apply_menu_locks(config)))
+
+    # Seam 9: profile-manager screen lockdown. Installed NOW (at add-on load),
+    # not on a hook: the picker's first showing (startup with multiple
+    # profiles) happens inside setupProfile, BEFORE main_window_did_init fires
+    # — and the screen is rebuilt fresh on every showing, so the lock lives in
+    # a wrap of mw.showProfileManager (see install_profile_manager_lock).
+    if any(core.profile_manager_lock_plan(config).values()):
+        _safe(install_profile_manager_lock)(config)
 
     # Seam 2: programmatic-open guard, exact-name filtered and config-gated.
     locked_names = core.locked_dialog_names(config)

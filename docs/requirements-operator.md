@@ -2,8 +2,8 @@
 
 Implementation spec for the **AnkiInstance Kubernetes operator** of the Anki-as-a-Service
 platform. Written for an implementing agent. This doc is subordinate to
-[ARCHITECTURE.md](./ARCHITECTURE.md) (esp. §2, §3, §6, §8, §10, §12, §13) and to the ci-buddy
-credentials contract in [../REQUIREMENTS.md](../REQUIREMENTS.md) §B.2 — where this doc is silent
+[ARCHITECTURE.md](./ARCHITECTURE.md) (esp. §2, §3, §6, §8, §10, §12, §13) and to the tunnel
+credentials contract in [contracts.md §8c](./contracts.md) — where this doc is silent
 or unclear, those win. Anything the authoritative docs leave unresolved is parked in
 [§12 Open questions](#12-open-questions), not decided here by fiat.
 
@@ -49,8 +49,9 @@ traffic and never decides *when* a user should be awake.
   **(2026-07-11: the activator is shelved for v1 — the lifecycle service now writes
   `spec.replicas`, [ARCHITECTURE §16](./ARCHITECTURE.md).)** Still not the operator's job: it
   obeys whatever `spec.replicas` says; the pod's `preStop` owns the drain.
-- **Creating / deleting CRs, writing spec (except replicas), the credential Secret's *content*,
-  the `user→pass→hkey` exchange.** The **lifecycle service** owns those
+- **Creating / deleting CRs, writing spec (except replicas), the credential Secret's *content*
+  (the tunnel token — the former `user→pass→hkey` exchange was removed in v1, ARCHITECTURE §6).**
+  The **lifecycle service** owns those
   ([ARCHITECTURE §2, §6](./ARCHITECTURE.md)). The operator only *mounts* the Secret; it never
   reads it and holds no RBAC on it (§6, §9).
 - **The pod image itself** (Anki + ci-buddy + AnkiMCP + rclone + noVNC), rclone/FUSE privilege
@@ -114,7 +115,8 @@ spec:
   restartedAt: ""      # string (RFC3339), optional. LIFECYCLE-OWNED (added 2026-07-11 — ARCH §16.6).
                        #   Restart nonce: the operator copies the value into the pod template as an
                        #   annotation (the `kubectl rollout restart` pattern) → pod recreated, PVC
-                       #   untouched. Used for hkey pickup after (re)login + tunnel reconnect/takeover.
+                       #   untouched. Used for tunnel reconnect/takeover. (Formerly also hkey
+                       #   pickup — credential channel removed in v1, ARCHITECTURE §6.)
   dataRetention: Retain # enum {Retain, Delete}, default Retain (PROPOSED name — this spec owns the
                        #   exact naming, contracts.md §2). LIFECYCLE-OWNED (added 2026-07-11 — ARCH
                        #   §16.7). PVC fate on CR delete: Delete → the operator's finalizer deletes
@@ -264,7 +266,7 @@ spec:
       securityContext:                         # POD-level; §10 layer 3
         runAsNonRoot: true
         runAsUser:  <anki uid, image-defined>
-        fsGroup:    <anki gid>                 # so the 0400 Secret file is readable (§4.5, REQ §B.2)
+        fsGroup:    <anki gid>                 # so the 0400 Secret file is readable (§4.5)
         seccompProfile: { type: RuntimeDefault }
       affinity:
         nodeAffinity:                          # §3 — Cloud Volumes can't attach to dedicated servers
@@ -291,17 +293,17 @@ spec:
             - { name: vnc-ws, containerPort: 6080 }   # noVNC websocket (websockify)
           volumeMounts:
             - { name: profile, mountPath: /data }             # the PVC
-            - { name: sync-credentials, mountPath: /run/ankimcp, readOnly: true }  # §4.5
+            - { name: credentials, mountPath: /run/ankimcp, readOnly: true }  # §4.5 (tunnel token)
           # readiness probe: gates the VNC door + wake completion — probe reflects "Anki up +
           # rclone mount live + add-on live" (image defines the exact check; 2026-07-11: the
           # platform-level MCP readiness signal is "add-on connected to the tunnel", not this
           # probe — contracts.md §7).
       volumes:
-        - name: sync-credentials
+        - name: credentials
           secret:
             secretName: anki-alice              # anki-<keycloakId> (contracts.md §8); lifecycle writes it
             optional: true                       # missing Secret must NOT wedge pod start (§4.5)
-            defaultMode: 0400                    # REQ §B.2: 0400, owned by anki uid (via fsGroup)
+            defaultMode: 0400                    # 0400, owned by anki uid (via fsGroup) — §4.5
 ```
 
 **Pod shape — DECIDED (2026-07-10): per-user rclone SIDECAR** (default
@@ -430,32 +432,27 @@ spec:
 ### 4.5 Credentials Secret **mount** (the operator mounts; it never writes)
 
 The operator wires the STS to mount a per-user Secret whose **content is written by the lifecycle
-service** ([ARCHITECTURE §6](./ARCHITECTURE.md); this supersedes ci-buddy REQUIREMENTS §C.2 — **no
-credential sidecar**, plain Secret mount, kubelet's ~60s refresh + ci-buddy's 1–2s file poll ⇒
-rotation lands in ≤ ~1 min with no restart). **(2026-07-11 — superseded for hosted v1,
-[ARCHITECTURE §16.6](./ARCHITECTURE.md):** the ci-buddy live file-poll pickup path stays **built
-but UNUSED** for hosted v1 — hosted v1 credential pickup = **pod restart via `spec.restartedAt`**
-(the lifecycle service bumps it after the Secret write when the pod is running; a fresh pod
-mounts the current Secret at start). The kubelet-refresh + file-poll mechanics remain true and
-remain the fallback/upgrade path.**)** Contract the mount must satisfy
-([../REQUIREMENTS.md §B.2](../REQUIREMENTS.md)):
+service** ([ARCHITECTURE §6](./ARCHITECTURE.md)).
+
+> **Scope change (2026-07): sync credentials removed in v1.** The Secret's former
+> `sync-credentials.json` data key (the hkey channel for ci-buddy) is **gone** — AnkiWeb login is
+> user-managed over VNC and persists on the PVC ([../REQUIREMENTS.md](../REQUIREMENTS.md) Part B).
+> The Secret now carries only the **`tunnel-credentials.json`** data key
+> ([contracts.md §8c](./contracts.md)), read by the AnkiMCP add-on. The earlier layered notes
+> (kubelet-refresh + ci-buddy file-poll rotation, then restart-based pickup via
+> `spec.restartedAt`, [ARCHITECTURE §16.6](./ARCHITECTURE.md)) are all moot.
+
+Contract the mount must satisfy:
 
 - **Whole-volume mount, NEVER `subPath`.** `subPath` mounts are frozen at creation and never
-  refresh — that would silently kill credential rotation. Mount the Secret volume at a directory
-  (`/run/ankimcp`) so the file `/run/ankimcp/sync-credentials.json` refreshes.
-- The Secret's data key is the filename (`sync-credentials.json`); the ci-buddy
-  `credentials_path` default is `/run/ankimcp/sync-credentials.json` — mount path + key must add up
-  to exactly that (coordinate with headless-anki's ci-buddy config). **(2026-07-11)** The same
-  whole-volume mount now carries a **second data key `tunnel-credentials.json`**
-  ([contracts.md §8c](./contracts.md)) — it materializes at `/run/ankimcp/tunnel-credentials.json`
-  automatically; **operator behavior is unchanged** (whole-volume mount, no per-key wiring).
+  refresh — that would silently kill token rotation. Mount the Secret volume at a directory
+  (`/run/ankimcp`) so the file `/run/ankimcp/tunnel-credentials.json` refreshes.
 - **`defaultMode: 0400` + `fsGroup`** so the file is `0400` yet readable by the Anki uid (a
-  root-owned 0400 mount is unreadable by the unprivileged app — REQ §B.2).
-- **`optional: true`** so a not-yet-created Secret doesn't wedge pod start; ci-buddy treats an
-  absent file as a safe no-op and retries (REQ §B.3). Lifecycle should create Secret + CR together,
-  but the pod must not hard-depend on ordering.
+  root-owned 0400 mount is unreadable by the unprivileged app).
+- **`optional: true`** so a not-yet-created Secret doesn't wedge pod start. Lifecycle should
+  create Secret + CR together, but the pod must not hard-depend on ordering.
 - The operator has **no RBAC to read Secrets** (§9) — it only names one in a volume; the kubelet
-  performs the mount. It never touches hkeys.
+  performs the mount. It never touches the token.
 
 ### 4.6 What the operator does **not** create
 
@@ -614,7 +611,7 @@ guarded by the leader. Keep it simple and leader-scoped (single active operator,
   | `events` (core) | create, patch | surface reconcile events |
   | `configmaps` (core) | get, list, watch | fleet config (§6), if used |
   | `leases` (`coordination.k8s.io`) | get, list, watch, create, update, patch, delete | leader election |
-  | **`secrets`** | **NONE** | the operator must **never** read user hkeys (§4.5, §10 layer 2). Mounting a Secret needs no operator RBAC. |
+  | **`secrets`** | **NONE** | the operator must **never** read user credentials (§4.5, §10 layer 2). Mounting a Secret needs no operator RBAC. |
   | **`ciliumnetworkpolicies`** | **NONE** | namespace-wide policy is infra-owned (§4.4) |
 
   Scope Role vs ClusterRole to the instance namespace where possible; leader-election Lease lives in
@@ -651,8 +648,10 @@ Per [ARCHITECTURE §13 + §12 item 11](./ARCHITECTURE.md):
   ingress only from the ~~activator~~ **VNC gateway**, egress only DNS + AnkiWeb + B2 **+ the
   in-cluster tunnel service** (2026-07-11, contracts.md §4).
 - **Layer 2 (minimal pod secrets):** `automountServiceAccountToken:false`, zero-permission SA, no
-  operator Secret RBAC; only the revocable hkey reaches the pod (as a mounted file), plus the
-  per-user prefix-scoped B2 key (delivered by infra/lifecycle, not the operator).
+  operator Secret RBAC; only the tunnel token reaches the pod as a mounted file, plus the
+  per-user prefix-scoped B2 key (delivered by infra/lifecycle, not the operator). (The hkey is
+  no longer delivered — credential channel removed in v1, ARCHITECTURE §6; it exists on the pod
+  only inside `prefs21.db` after the user's own VNC login.)
 - **Layer 3 (pod hardening):** the **anki container** is hardened (`runAsNonRoot`, drop-`ALL`,
   no-privesc, seccomp `RuntimeDefault`, no added caps, resource limits, §4.1). The FUSE/`baseline`
   tension is **resolved (2026-07-10): per-user rclone sidecar** — the sidecar is `privileged: true`
@@ -739,8 +738,8 @@ Things envtest structurally can't cover:
 - [ ] Creating a CR yields a StatefulSet + headless Service with correct ownerRefs, RWOP,
       `whenScaled/whenDeleted: Retain`, node affinity to `cloud` nodes, PSA-baseline + layer-3
       hardened pod template, `automountServiceAccountToken:false`, resource limits.
-- [ ] Credentials Secret mounted whole-volume (never `subPath`), `0400`+`fsGroup`, `optional:true`,
-      at the ci-buddy `credentials_path`; operator holds **no** Secret RBAC.
+- [ ] Credentials Secret (tunnel token only — §4.5) mounted whole-volume (never `subPath`),
+      `0400`+`fsGroup`, `optional:true`, at `/run/ankimcp`; operator holds **no** Secret RBAC.
 - [ ] `spec.replicas` 0↔1 drives STS replicas; `spec.suspended` gates to 0; operator never writes
       any `spec` field (only `status`).
 - [ ] **(2026-07-11)** `spec.restartedAt` changes roll the pod via the template annotation

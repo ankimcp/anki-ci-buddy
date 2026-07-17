@@ -19,17 +19,29 @@
 > (d) §6.1 (AnkiWeb hkey wire shape) and §6.2 (per-user B2 keys) are now **verified** — see the
 > rewritten sections; `ANKIWEB_SYNC_LOGIN_MODE` is dropped from §11.
 
+> **REVISED 2026-07 (platform decision): the AnkiWeb GUI credential channel is REMOVED from
+> v1.** This service **no longer** performs the password→hkey exchange (§6.1), no longer writes
+> the `sync-credentials.json` Secret data key or bumps a credential `serial` (§6.3), and never
+> restarts a pod for hkey pickup. The user logs into AnkiWeb **manually inside Anki over VNC**;
+> the login persists in `prefs21.db` on the PVC and is wiped only when the instance + PVC are
+> deleted ([../REQUIREMENTS.md](../REQUIREMENTS.md) Part B; ARCHITECTURE §6). The
+> `ankiwebLogin` API, the `credential` DB table, and the "credentials active within a minute"
+> UX are dropped with it. The credentials Secret `anki-<keycloakId>` remains, carrying **only**
+> the tunnel token (§6.4, contracts.md §8/§8c). Sections below describing the hkey flow are
+> retained as history and marked where they occur; the §6.1 AnkiWeb wire-shape research stays
+> valid as protocol knowledge.
+
 Implementation spec for the **lifecycle service**: the control-plane front door of the
 Anki-as-a-Service platform. It translates authenticated user (and admin) intents into
-**`AnkiInstance` CR writes** and **k8s Secret writes**, and it owns the two credential
-exchanges no other component may hold (the AnkiWeb password → hkey mint, and the per-user
-B2 application-key provisioning). Written for an implementing agent.
+**`AnkiInstance` CR writes** and **k8s Secret writes**, and it owns the credential
+exchange no other component may hold (the per-user
+B2 application-key provisioning; formerly also the AnkiWeb password → hkey mint — removed in
+v1, see the 2026-07 banner). Written for an implementing agent.
 
 Authoritative inputs (do **not** contradict): platform
 [ARCHITECTURE.md](./ARCHITECTURE.md) (esp. §2, §6, §8, §9, §10 layer 2, §13, §14), the shared
 [contracts.md](./contracts.md) registry (GVR, CR field ownership, naming, namespace, labels,
-Secret, B2 key/prefix), and the ci-buddy [../REQUIREMENTS.md](../REQUIREMENTS.md) Part B
-credentials-file contract (§B.1, §B.2). Anything the authoritative docs leave unresolved is
+Secret, B2 key/prefix). Anything the authoritative docs leave unresolved is
 captured in **§15 Open questions**, not decided here.
 
 **Power gate (decided — [contracts.md §2](./contracts.md)):** the lifecycle-owned administrative
@@ -50,12 +62,13 @@ v1 — operator computes `effectiveReplicas = suspended ? 0 : replicas`).
 
 **Goal:** a small stateful control-plane service that is the *only* writer of a user's
 `AnkiInstance` CR ~~(except `spec.replicas`, owned by the activator)~~ **(2026-07-11: including
-`spec.replicas` — single-writer v1, contracts.md §2)** and the *only* holder of that user's
-AnkiWeb password during the hkey exchange.
+`spec.replicas` — single-writer v1, contracts.md §2)**. ~~And the *only* holder of that user's
+AnkiWeb password during the hkey exchange~~ (2026-07: no component holds the AnkiWeb password —
+the credential channel is removed; login is manual over VNC).
 
 **In scope**
 - REST/RPC management API: **create / delete / stop / start / reset / get-status** an
-  instance, and **AnkiWeb re-login**.
+  instance. ~~And **AnkiWeb re-login**~~ (2026-07: removed with the credential channel).
 - **(added 2026-07-11)** The **pod→tunnel credential**: mint the per-instance opaque bearer token
   and write it as the second Secret data key `tunnel-credentials.json` (§6.4, contracts.md §8c).
 - **(added 2026-07-11)** **Wake / ensure-connected** (§5.7): serve the tunnel's NATS call; run the
@@ -65,14 +78,14 @@ AnkiWeb password during the hkey exchange.
   per-request quota events + VNC-gateway session signals) and set `spec.replicas: 0` on expiry.
 - **(added 2026-07-11)** **Tier gate & lapse** (§5.9): `pro`-gated create; consume
   `subscription.tier_changed`; immediate power gate + 1-month grace + delete saga on lapse.
-- The **AnkiWeb credential flow**: accept `username+password`, mint the **hkey**, write the
-  ci-buddy §B.2 Secret with a **monotonic serial**, never persist the password.
+- ~~The **AnkiWeb credential flow**~~ — **REMOVED in v1** (2026-07 banner): no
+  password→hkey mint, no sync-credentials Secret key, no serial.
 - The **B2 credential flow**: provision a **per-user application key restricted to the
   user's prefix**, deliver it where the pod/CSI expects it, rotate + revoke it on delete.
 - **Provisioning orchestration** (signup → B2 key → Secret → CR), idempotency,
   partial-failure recovery, rate limiting.
-- **Status/events** projection for the dashboard (§9 of ARCHITECTURE), incl. the
-  "credentials active within a minute" signal and the AGPL source-link data.
+- **Status/events** projection for the dashboard (§9 of ARCHITECTURE) and the AGPL
+  source-link data.
 - The **admin surface** (list all, force-stop), separated from the user surface.
 
 **Out of scope (other components — do NOT build here)**
@@ -90,9 +103,9 @@ AnkiWeb password during the hkey exchange.
   2026-07-11: the **tunnel** for MCP, the **VNC gateway** for VNC).
 - Delivering the credentials file *into the pod filesystem* — the operator/headless-anki
   side owns the Secret→file mechanics; the lifecycle service only writes the **Secret
-  object** in the API contract (§6.3, ci-buddy §B.2/§C.2).
-- Sync execution and the credentials *read/apply* loop — the AnkiMCP add-on and ci-buddy
-  own those (ci-buddy §B).
+  object** (tunnel token, §6.4).
+- Sync execution — the AnkiMCP add-on owns it. Sync *credentials* are user-managed
+  (manual VNC login, ci-buddy REQUIREMENTS Part B) — no component reads or applies them.
 
 ---
 
@@ -112,9 +125,9 @@ These are invariants; a change that violates one is a bug, not a feature.
 3. **Never touches a running pod.** All controls follow the platform's single pattern:
    **patch desired state → let the operator reconcile** (ARCHITECTURE §9). No
    `kubectl exec`, no live surgery, no in-pod filesystem writes.
-4. **The AnkiWeb password never leaves this service and is never persisted.** It exists
-   only for the duration of the `sync_login` call, in memory, then is dropped
-   (ARCHITECTURE §6; ci-buddy §B.1).
+4. **This service never sees the AnkiWeb password** (2026-07: the credential channel is
+   removed — login happens inside the pod over VNC; formerly the password was
+   request-scoped in-memory for the `sync_login` call only, ARCHITECTURE §6).
 5. **The pod carries zero k8s credentials.** This service holds the k8s API access, scoped
    to `AnkiInstance` CRs + Secrets in the anki namespace (§9). The pod gets a mounted
    Secret and nothing else (ARCHITECTURE §10 layer 2, decision 9).
@@ -158,8 +171,8 @@ invent new patterns.
 ## 4. Data model (own Postgres DB)
 
 The service is **stateful** (unlike the CR being the source of truth for *desired workload*,
-this service needs durable state the cluster does not hold): the **monotonic credential
-serial** and the **B2 key handle** must survive restarts and cannot be re-derived. Follow
+this service needs durable state the cluster does not hold): the **B2 key handle** must
+survive restarts and cannot be re-derived. Follow
 the media-library DB conventions (§3): own DB `anki_lifecycle`, Kysely, migrations in a
 migrate init-container.
 
@@ -171,23 +184,14 @@ Proposed tables (names illustrative):
   power gate `spec.suspended` §5.4), `provisioning_state` (§7 saga:
   `PENDING|B2_READY|SECRET_READY|CR_READY|ACTIVE|DELETING|FAILED`), `deleted_at` (soft-delete
   tombstone for the destructive flow §5.3).
-- **`credential`** — the AnkiWeb credential envelope state per user. `keycloak_id`,
-  **`serial` (bigint, monotonic — the single source of truth for ci-buddy §B.2's serial)**,
-  `hkey_fingerprint` (sha256[:8] — **never the hkey itself**), `endpoint`, `username`
-  (display), `last_written_at`. The Secret object holds the live hkey; the DB holds only the
-  serial + fingerprint for idempotency and audit.
+- ~~**`credential`** — the AnkiWeb credential envelope state per user~~ — **DROPPED
+  (2026-07)** with the credential channel: no serial, no hkey fingerprint, no endpoint/username
+  state. There is nothing to track — AnkiWeb login is user-managed in the pod (VNC) and never
+  transits this service.
 - **`b2_key`** — per-user B2 application key handle. `keycloak_id`, `b2_key_id` (the
   `applicationKeyId`, **not** the secret), `name_prefix`, `capabilities`, `created_at`,
   `revoked_at`. The `applicationKey` secret itself is **never stored here** — it is written
   straight into the Secret and forgotten (shown once by B2, §6.2).
-
-> **Serial rule (load-bearing, ci-buddy §B.2):** `serial` is a **monotonic bigint per user**,
-> incremented on **every** credential write (initial login, re-login, rotation). It must be
-> read from and written to this DB inside the same transaction that writes the Secret, so a
-> crash cannot reuse or roll back a serial. Never derive it from a clock or the Secret's
-> `resourceVersion`. ci-buddy re-injects **only when serial increases** and treats a
-> non-increasing serial as "no change" — a duplicated or decreasing serial silently breaks
-> rotation pickup.
 
 ---
 
@@ -243,7 +247,7 @@ supplies an arbitrary instance id; identity is the edge-stamped `keycloakId`.
 | Start | `POST /v1/instance/start` | `instance.start` | User "on": set `spec.suspended: false` **and `spec.replicas: 1`** (2026-07-11 — one atomic intent under the single writer; this is also the **manual wake from sleep**, ARCHITECTURE §16.4). ~~The next request wakes it via the activator.~~ |
 | Reset | `POST /v1/instance/reset` | `instance.reset` | Recreate the pod, **keep data** (§5.5): bump `spec.restartedAt`. Also the dashboard **Reconnect** lever (§5.7). |
 | Delete | `DELETE /v1/instance` | `instance.delete` | Destructive teardown incl. data fate (§5.6). Requires confirmation. |
-| AnkiWeb re-login | `POST /v1/instance/ankiweb-login` | `instance.ankiwebLogin` | The credential flow (§6.1): mint hkey, bump serial, write Secret (+ restart the running pod for pickup, §6.3). |
+| ~~AnkiWeb re-login~~ | ~~`POST /v1/instance/ankiweb-login`~~ | ~~`instance.ankiwebLogin`~~ | **REMOVED in v1 (2026-07)** — no credential flow; the user logs into AnkiWeb inside Anki over VNC (§6.1/§6.3 notices). |
 | **Internal: ensure-connected** | — (NATS internal subject only) | `internal.ensureConnected` | **(added 2026-07-11)** Tunnel-called wake (§5.7): checks instance/tier/gate; asleep → `replicas: 1`; running-but-disconnected → bump `restartedAt`; typed rejection otherwise. |
 | **Admin: list** | `GET /v1/admin/instances` | `admin.list` (internal subject) | List all instances + phases. Admin only (§8). |
 | **Admin: force-stop** | `POST /v1/admin/instance/:user/stop` | `admin.forceStop` | Set the power-gate on any user's instance. Admin only. |
@@ -299,9 +303,10 @@ The lifecycle service **does not** delete the pod itself. Reset **must not** rot
 or the B2 key (data-preserving by definition).
 
 Besides user-initiated reset, this service bumps `spec.restartedAt` for:
-- **hkey pickup after AnkiWeb (re)login while the pod is running** (§6.3 — hosted v1 uses
-  restart, NOT ci-buddy live injection; the live-pickup path stays built but unused);
 - **tunnel reconnect / takeover** (§5.7 — running-but-disconnected lever; dashboard Reconnect).
+
+(~~hkey pickup after AnkiWeb re-login~~ — removed 2026-07 with the credential channel; a VNC
+login needs no pickup, it lands directly in the running pod's profile.)
 
 ### 5.6 Delete — destructive flow (data fate spelled out)
 
@@ -324,7 +329,7 @@ Delete is the one irreversible operation; treat it like `rm -rf` on the user's w
 | **PVC (SQLite collection, prefs, addons)** | **deleted** | **RESOLVED (2026-07-11 — ARCHITECTURE §16.7):** operator-owned via a **CR data-fate field** (e.g. `spec.dataRetention: Delete\|Retain`; the operator spec owns exact naming). This service sets the field, then deletes the CR; the operator deletes the PVC in its **finalizer flow** when fate=Delete. This service never touches the PVC (zero workload-object RBAC verbs, §9). The **`retainData` option** maps to `Retain` (account-hold / accidental-delete safety). |
 | **B2 per-user media prefix** | **deleted** | best-effort delete of all objects under the user's prefix (bounded-concurrency `DeleteObject`, per the media-library seam), then **revoke the B2 key** (§6.2). Offer `retainData` to skip. |
 | **B2 application key** | **revoked always** | `b2_delete_key`; a leaked key must die even when data is retained. |
-| **k8s Secrets** | deleted always | **both** `anki-<keycloakId>` (live hkey) and `anki-<keycloakId>-b2` (B2 env creds). |
+| **k8s Secrets** | deleted always | **both** `anki-<keycloakId>` (tunnel token) and `anki-<keycloakId>-b2` (B2 env creds). (The user's AnkiWeb login lives in `prefs21.db` on the PVC and dies with the PVC per the data-fate field.) |
 | **DB rows** | soft-delete tombstone, then GC after a grace window | audit + late-arriving webhook safety. |
 
 Delete is a **saga** with the same idempotency/partial-failure discipline as create (§7):
@@ -387,11 +392,17 @@ as-is):
 
 ### 6.1 AnkiWeb hkey mint
 
-**Trigger:** `instance.ankiwebLogin` (initial signup login and every re-login/rotation).
+> **REMOVED in v1 (2026-07, platform decision — see the top banner).** This flow is not
+> implemented: there is no `ankiwebLogin` trigger and the service never sees an AnkiWeb
+> password or hkey. The user logs into AnkiWeb inside Anki over VNC; the login persists on
+> the PVC. The verified wire-shape research below is retained as protocol knowledge only
+> (it is the same exchange desktop Anki performs internally on login).
+
+**Trigger:** ~~`instance.ankiwebLogin`~~ (none in v1 — see notice above).
 
 **Input:** `{ username, password, endpoint? }`. `password` is **request-scoped, in-memory,
-never logged, never persisted, never written to the CR or DB** (§2 rule 4; ci-buddy §B.1,
-§B.8). Redact it from any error/trace.
+never logged, never persisted, never written to the CR or DB** (§2 rule 4). Redact it from
+any error/trace.
 
 **Exchange — verified wire shape (RESOLVED 2026-07-11, verified against Anki source at tag
 25.09.2 — implement DIRECTLY in Node, no shelling to Anki):**
@@ -415,17 +426,15 @@ response:  zstd( JSON {"key": "<hkey>"} )    # carries an anki-original-size hea
   must not become a password oracle against AnkiWeb — see also §7 rate limiting).
 - (The former alternative — shelling out to Anki's own backend `sync_login` — is **dropped**;
   there is only one mode, so `ANKIWEB_SYNC_LOGIN_MODE` is removed from §11.)
-- **Threat sizing (document honestly, ci-buddy §B.1):** the hkey is **account-scoped, not
+- **Threat sizing (still true, now for the PVC):** the hkey is **account-scoped, not
   per-device**; there is no granular AnkiWeb revoke — the only kill switch is the user
   changing their AnkiWeb password. A leaked hkey = full read/write on the collection until
-  then. Treat the Secret as password-adjacent.
+  then. Post-removal it lives only in `prefs21.db` on the PVC (after the user's VNC login) —
+  treat that volume as secret-grade.
 
-**On success:** write the Secret (§6.3) with `serial = last_serial + 1` (§4), store the
-`hkey_fingerprint` + `serial` + `endpoint` + `username` in `credential`, drop the password.
-
-**Endpoint allowlist:** if a custom `endpoint` is supplied, allowlist scheme+host (default
-AnkiWeb hosts `ankiweb.net`/`ankiuser.net`) — the endpoint is an exfil vector (ci-buddy §B.4).
-Reject → error, keep default. (ci-buddy also allowlists on the read side; belt-and-suspenders.)
+~~**On success:** write the Secret (§6.3) with `serial = last_serial + 1`, store the
+fingerprint envelope, drop the password. **Endpoint allowlist** on custom endpoints.~~
+(All removed with the flow — see the notice at the top of §6.1.)
 
 ### 6.2 B2 per-user application key
 
@@ -454,9 +463,8 @@ the `media-library-b2-provisioning.md` bucket-scoped + per-user-prefix model, ex
 - **The `applicationKey` secret is shown once** by B2 — capture it, write it straight into
   the Secret / the location the CSI/pod expects (§6.3), and **never store it** (only the
   `applicationKeyId` handle goes in `b2_key`, §4).
-- **Rotation:** re-mint (create new, write, then delete old) on demand / on a schedule; treat
-  like the hkey rotation (bump nothing on the AnkiWeb serial, but the pod must pick up the new
-  B2 key — coordinate delivery with the FUSE/CSI design, §15).
+- **Rotation:** re-mint (create new, write, then delete old) on demand / on a schedule; the
+  pod must pick up the new B2 key — coordinate delivery with the FUSE/CSI design (§15).
 - **Revocation:** `b2_delete_key` on instance delete (always, §5.6) and on rotation (old key).
 - ~~⚠️ **Verify B2 account limits (§15).**~~ **RESOLVED (2026-07-11, verified):** key-per-user is
   **viable** — the documented cap is **100M application keys per account**, far beyond target
@@ -468,9 +476,9 @@ The lifecycle service writes a **SECOND, SEPARATE per-user Secret** named
 **`anki-<keycloakId>-b2`** (namespace `anki-instances`), holding ONLY the rclone/B2 **env**
 creds. The operator `envFrom`s this Secret into the **rclone sidecar only**. It is a distinct
 object from the credentials Secret (`anki-<keycloakId>`, §6.3) **on purpose**: the credentials
-Secret holds the hkey and its `sync-credentials.json` key **is** a valid env-var name (the
-kubelet does **not** skip it), so folding the B2 creds into it and `envFrom`ing the whole thing
-would leak the hkey into the privileged sidecar's environment. Keep them apart.
+Secret holds the tunnel token and its `tunnel-credentials.json` key **is** a valid env-var name
+(the kubelet does **not** skip it), so folding the B2 creds into it and `envFrom`ing the whole
+thing would leak the token into the privileged sidecar's environment. Keep them apart.
 
 **`anki-<keycloakId>-b2` required keys** (the `s3`-at-B2 backend set; matches
 `rclone-mount.sh`, which builds `b2:${B2_BUCKET}/${B2_PREFIX}` and dies on empty `B2_BUCKET`):
@@ -487,54 +495,32 @@ would leak the hkey into the privileged sidecar's environment. Keep them apart.
 
 If the still-open backend choice (contracts.md decision #5) lands on native `b2`, the
 `RCLONE_CONFIG_B2_*` value set changes (`_ACCOUNT`/`_KEY` in place of the S3 access-key pair);
-`envFrom` is backend-agnostic. **Both** Secrets are this service's write surface — same as the
-hkey — and both are deleted on instance delete (§5.6).
+`envFrom` is backend-agnostic. **Both** Secrets are this service's write surface, and both are
+deleted on instance delete (§5.6).
 
-### 6.3 The Secret this service writes (ci-buddy §B.2 contract)
+### 6.3 The credentials Secret this service writes
 
-The lifecycle service is the **writer** of the k8s Secret that ci-buddy's §B.2 contract
-consumes (as a file inside the pod). It writes the **Secret object** (named
-**`anki-<keycloakId>`** in the `anki-instances` namespace — [contracts.md §8](./contracts.md)); the
-operator owns the object→file mount (whole-volume at `/run/ankimcp`, file
-`sync-credentials.json`, never `subPath` — ci-buddy §C.2; ARCHITECTURE §6).
+> **Sync-credentials payload REMOVED in v1 (2026-07 — see the top banner and
+> [contracts.md §8](./contracts.md)).** This Secret formerly carried the ci-buddy hkey JSON
+> (`sync-credentials.json`, monotonic `serial`, endpoint, username) plus the restart-based /
+> file-poll pickup machinery — all gone. There is no serial, no rotation UX, no
+> "credentials active within a minute", and no restart-for-pickup.
 
-Secret payload (one key holds the ci-buddy JSON, atomically written; the whole object is
-replaced, so the mount refreshes):
+The lifecycle service still writes the **Secret object** **`anki-<keycloakId>`** (namespace
+`anki-instances`), now carrying **only** the `tunnel-credentials.json` data key (§6.4,
+[contracts.md §8c](./contracts.md)). The operator owns the object→file mount (whole-volume at
+`/run/ankimcp`, never `subPath`). Perms/ownership of the mounted file (`0400`, Anki uid) are
+the operator's `defaultMode`/`fsGroup` job; the lifecycle service only guarantees the object
+contents. B2 key material does **NOT** ride this Secret — it goes in the separate
+`anki-<keycloakId>-b2` Secret (§6.2, contracts.md §8b) so the token never reaches the
+privileged sidecar's env.
 
-```json
-{ "v": 1, "serial": 7, "hkey": "…", "endpoint": "https://sync.example.com/", "username": "user@example.com" }
-```
+### 6.4 Pod→tunnel token — the Secret data key (PINNED 2026-07-11, contracts.md §8c)
 
-- **`serial`** is the monotonic value from `credential` (§4) — bumped every write.
-- **`endpoint`** omitted for default AnkiWeb; **`username`** display-only.
-- The B2 key material does **NOT** ride this Secret. It goes in the **separate**
-  `anki-<keycloakId>-b2` Secret (§6.2, contracts.md §8b) so the hkey never reaches the
-  sidecar's env. This Secret (the hkey) is **file-mounted into the anki container only** and is
-  never `envFrom`'d anywhere.
-- **Write atomically** (the Secret object is replaced wholesale; k8s `apply`/`update` is
-  atomic at the object level — satisfies ci-buddy's "reader never sees a partial file" once
-  mounted). Never patch a single field in a way that could interleave with the serial bump.
-- **Perms/ownership** of the *mounted file* (`0400`, Anki uid) are the operator's
-  `defaultMode`/`fsGroup` job (ci-buddy §B.2, §C) — surface this requirement to the operator
-  spec; the lifecycle service only guarantees the object contents + serial monotonicity.
-
-**Rotation UX ("Option 1", ARCHITECTURE §6, decision 10):** after a re-login the dashboard
-shows **"credentials active within a minute"** — the service returns the new serial and a
-timestamp; ci-buddy's ≤~1min pickup (kubelet ~60s Secret refresh + 1–2s file poll) makes it
-land with **no pod restart**. Never claim instant; surface the ~60s window (§10).
-
-> **Hosted v1 pickup is RESTART-based (2026-07-11 — ARCHITECTURE §16.6):** after writing the
-> Secret, if the pod is **running**, this service bumps `spec.restartedAt` (§5.5) — the fresh pod
-> mounts the current Secret at boot, so there is no 60s wait; if the pod is asleep/off, nothing
-> more is needed (the next start mounts the current Secret). ci-buddy's ≤~1min live-pickup path
-> above stays **built but unused for hosted v1**. The "within a minute" promise still holds
-> (restart ≈ 30–60s).
-
-### 6.4 Pod→tunnel token — the second Secret data key (PINNED 2026-07-11, contracts.md §8c)
-
-This service mints an **opaque per-instance bearer token** and writes it as the **second data key
-`tunnel-credentials.json`** in the SAME credentials Secret `anki-<keycloakId>` — same whole-volume
-mount, anki container only, never `envFrom`'d (§6.2's hkey-separation reasoning applies
+This service mints an **opaque per-instance bearer token** and writes it as the data key
+`tunnel-credentials.json` in the credentials Secret `anki-<keycloakId>` (its **only** data key
+since the 2026-07 sync-credentials removal, §6.3) — whole-volume
+mount, anki container only, never `envFrom`'d (§6.2's separation reasoning applies
 identically). It authenticates the pod's AnkiMCP add-on to the tunnel and marks the connection as
 **hosted**.
 
@@ -545,11 +531,11 @@ identically). It authenticates the pod's AnkiMCP add-on to the tunnel and marks 
   tier/entitlement data in the file** (pod untrusted — checks are server-side, §5.7).
 - **The tunnel validates the token against the lifecycle signing key** (config, §11) — key
   distribution rides the normal Bitwarden→Vault→ESO pipeline.
-- Mint fresh, **never persist the token** (a fingerprint for audit is fine — same discipline as
-  the hkey, §4); it never touches the PVC.
+- Mint fresh, **never persist the token** (a fingerprint for audit is fine); it never touches
+  the PVC.
 - **Rotation = replace the file + restart the pod** (`spec.restartedAt`).
-- Written during the create saga (§7 step 2) alongside the hkey key — unlike the hkey, it is
-  **always** present (MCP works without an AnkiWeb login).
+- Written during the create saga (§7 step 2); it is **always** present (MCP works without an
+  AnkiWeb login).
 
 ---
 
@@ -562,11 +548,10 @@ because they span three external systems (B2, k8s Secrets, k8s CRs) that fail in
 
 1. **B2 key** (`b2_create_key`, §6.2) → persist `b2_key` row, state `B2_READY`.
 2. **Secrets — write BOTH** (state `SECRET_READY`): (a) the credentials Secret
-   `anki-<keycloakId>` with **both data keys** — `sync-credentials.json` (hkey from §6.1 if the
-   user provided AnkiWeb creds at signup, else absent — ci-buddy no-ops on an absent file;
-   ci-buddy §B.3) **and `tunnel-credentials.json` (the tunnel token, §6.4 — always written)** —
+   `anki-<keycloakId>` with its single data key `tunnel-credentials.json` (the tunnel token,
+   §6.4 — always written; the former `sync-credentials.json` hkey key was removed in v1, §6.3)
    and (b) the separate `anki-<keycloakId>-b2` Secret with the B2 key material (§6.2). Keep the
-   B2 creds OUT of the credentials Secret so the hkey never reaches the sidecar env.
+   B2 creds OUT of the credentials Secret so the token never reaches the sidecar env.
 3. **AnkiInstance CR** create (server-side apply, ARCHITECTURE §12 item 11 —
    `ServerSideApply=true` because ArgoCD sync-waves are non-functional) → state `CR_READY`,
    then `ACTIVE` when the CR status reports provisioned.
@@ -672,12 +657,11 @@ The dashboard (ARCHITECTURE §9) needs a projected, stable view — never raw CR
   also expose the **tunnel-connection state** source for the panel's connected/disconnected
   indicator — in practice the dashboard reuses the existing tunnel-status seam rather than this
   service re-projecting it.
-- **Credential signal (decision 10):** after `ankiwebLogin`, return the new `serial` +
-  `appliedAtEstimate` and surface the dashboard string **"credentials active within a
-  minute"** — the ≤~1min pickup window (§6.3). The status view exposes
-  `lastCredentialSerial` + `credentialUpdatedAt` so the UI can show "updating…/active".
+- ~~**Credential signal (decision 10)**~~ — **DROPPED (2026-07)** with the credential channel:
+  no `ankiwebLogin`, no serial, no "credentials active within a minute" string, no
+  `lastCredentialSerial`/`credentialUpdatedAt` fields.
 - **Live events:** publish a per-user event on every mutation the dashboard cares about
-  (created, stopped/started, reset, credential-updated, deleting, failed), following the
+  (created, stopped/started, reset, deleting, failed), following the
   media-library event convention (`<domain>.<keycloakId>.updated` core-NATS fire-and-forget;
   `mediaLibraryEventSubject`), which the BFF fans out to the browser over its WS.
 - **AGPL source-link data (ARCHITECTURE §15):** expose the shipped Anki build + baked add-on
@@ -713,9 +697,9 @@ ANKI_NAMESPACE                 # anki-instances — holds AnkiInstance CRs + per
 ANKIINSTANCE_GROUP/VERSION     # anki.ankimcp.ai / v1alpha1 (contracts.md §1; or hardcode in the client seam)
 # in-cluster SA token is mounted, not an env var
 
-# AnkiWeb
-ANKIWEB_ENDPOINT_ALLOWLIST     # default ankiweb.net,ankiuser.net
-# ANKIWEB_SYNC_LOGIN_MODE — DROPPED 2026-07-11: only one mode exists (direct hostKey HTTP, §6.1)
+# AnkiWeb — no vars (2026-07: the credential flow is removed, §6.1)
+# ANKIWEB_ENDPOINT_ALLOWLIST — DROPPED 2026-07 with the credential flow
+# ANKIWEB_SYNC_LOGIN_MODE — DROPPED 2026-07-11: only one mode existed (direct hostKey HTTP, §6.1)
 
 # Tunnel (pod→tunnel token §6.4; wake/idle §5.7–§5.8) — names illustrative
 ANKI_TUNNEL_WS_URL             # env-specific internal wss://…/connect written into tunnel-credentials.json
@@ -753,8 +737,9 @@ live in `values-{dev,prod}.yaml`.
   Keycloak blip doesn't take the control plane down. The **k8s API** reachability is the one
   judgement call: prefer per-request degradation too (a k8s-API blip shouldn't NACK the pod),
   surfacing it as a `Failed`/retrying provisioning state rather than a readiness failure.
-  **Redaction:** never log the AnkiWeb password, the hkey, or the B2 `applicationKey` — log
-  fingerprints only (ci-buddy §B.8; error logs use `{ err: error }` per repo convention).
+  **Redaction:** never log the B2 `applicationKey` or the tunnel token — log
+  fingerprints only (error logs use `{ err: error }` per repo convention). (The AnkiWeb
+  password/hkey no longer transit this service at all — 2026-07 banner.)
 - **Shutdown:** `OnApplicationShutdown` flushing telemetry last; NATS RPC loop + Kysely pool
   + S3/k8s clients closed in their own `OnModuleDestroy` (knowledge-map shutdown pattern). A
   saga in flight must be safe to interrupt (state is in Postgres, §7).
@@ -782,22 +767,17 @@ live in `values-{dev,prod}.yaml`.
 
 **Unit (pure functions, no k8s/NATS — media-library keeps logic `aqt`/infra-free for exactly
 this):**
-1. **Serial monotonicity:** every credential write increments `serial` by exactly 1; a
-   concurrent double-write does not reuse or skip; a crash mid-write (simulated) never
-   emits a decreasing/duplicate serial. (Highest-value test — ci-buddy correctness depends on
-   it.)
+1. ~~**Serial monotonicity**~~ — dropped (2026-07): no credential serial exists.
 2. **Idempotency:** repeated `instance.create` for a user produces one B2 key, one Secret,
    one CR; resumes from each `provisioning_state`.
 3. **AuthZ:** a user request scoped to keycloak id A can never resolve/mutate B's instance;
    `admin.*` rejects non-ADMIN; user subject never reaches an admin method.
-4. **Endpoint allowlist:** custom endpoint outside allowlist rejected.
-5. **Delete confirmation:** delete without/with-stale token refused; data-fate matrix (§5.6)
+4. **Delete confirmation:** delete without/with-stale token refused; data-fate matrix (§5.6)
    honored incl. `retainData`.
-6. **Secret payload** exactly matches ci-buddy §B.2 shape (`v/serial/hkey/endpoint?/username`),
-   and the `tunnel-credentials.json` key exactly matches contracts.md §8c
-   (`v:1/token/tunnelUrl/user.id`; `tunnelUrl` always present; no tier data).
-7. **Redaction:** password/hkey/B2 key/tunnel token never appear in logs or traces
-   (fingerprint only).
+5. **Secret payload:** the `tunnel-credentials.json` key exactly matches contracts.md §8c
+   (`v:1/token/tunnelUrl/user.id`; `tunnelUrl` always present; no tier data); no other data
+   key exists (§6.3).
+6. **Redaction:** B2 key/tunnel token never appear in logs or traces (fingerprint only).
 
 **Added 2026-07-11:**
 
@@ -848,10 +828,9 @@ job (like media-library's B2/MinIO split) — don't claim coverage you don't hav
 - [ ] `instance.delete` is two-phase (confirmation token + typed-name), honors the data-fate
       matrix (default destroy PVC + B2 prefix; `retainData` keeps them; **B2 key + Secret
       always killed**), and is a resumable saga.
-- [ ] `ankiwebLogin` mints the hkey via the **verified `hostKey` wire shape** (§6.1 — direct
-      Node, protocol v11, zstd via `node:zlib`), **never persists the password**, writes the
-      §B.2 Secret with **monotonic serial +1**, restarts a running pod for pickup (§6.3), and
-      returns the "active within a minute" signal.
+- [ ] No AnkiWeb credential surface exists (2026-07 banner): no `ankiwebLogin` method, no
+      sync-credentials Secret key, no serial, no password/hkey handling anywhere in the
+      service.
 - [ ] Per-user B2 key is `namePrefix`+`bucketId`-restricted, delivered where the pod/CSI
       expects, rotatable, and revoked on delete; the `applicationKey` is never stored.
 - [ ] AuthN/Z reuses Keycloak; users manage only their own instance (edge-stamped
@@ -862,9 +841,9 @@ job (like media-library's B2/MinIO split) — don't claim coverage you don't hav
       events; exposes AGPL source-link metadata.
 - [ ] Config fail-fasts at boot listing every missing var; secrets via Bitwarden→Vault→ESO;
       dev/prod split; OTEL + Pino + health + graceful shutdown wired per saas conventions.
-- [ ] password / hkey / B2 applicationKey never logged (fingerprints only).
-- [ ] Tests cover serial monotonicity, idempotency, authZ, delete-confirmation, endpoint
-      allowlist, redaction (unit) + envtest/kind k8s + B2-sandbox (integration).
+- [ ] B2 applicationKey / tunnel token never logged (fingerprints only).
+- [ ] Tests cover idempotency, authZ, delete-confirmation, redaction (unit) +
+      envtest/kind k8s + B2-sandbox (integration).
 
 ---
 
@@ -903,18 +882,11 @@ job (like media-library's B2/MinIO split) — don't claim coverage you don't hav
    (2026-07-10 — the marker here was stale; [contracts.md §8b/§9](./contracts.md)):** the
    sidecar decision landed on an in-pod **Secret** — the separate `anki-<keycloakId>-b2` Secret,
    `envFrom`'d into the rclone sidecar only.
-6. ~~**Secret-write vs sidecar refresh.**~~ **RESOLVED (ARCHITECTURE §6 / decision 9, confirmed by
-   requirements-operator §4.5 + requirements-headless-anki-image §9):** **no credential sidecar** —
-   plain whole-volume Secret mount + kubelet ~60s refresh + ci-buddy 1–2s file poll ⇒ ≤ ~1min
-   pickup, no pod restart. This service writes the Secret **object** ([contracts.md §8](./contracts.md))
-   and the "≤1min pickup" claim (§6.3, §10) holds. (Supersedes ci-buddy §C.2's sidecar.)
-   **(2026-07-11 — superseded for hosted v1, ARCHITECTURE §16.6:** the ci-buddy live file-poll
-   pickup path stays **built but UNUSED** for hosted v1 — hosted v1 credential pickup = **pod
-   restart via `spec.restartedAt`** (§6.3: this service bumps it after the Secret write when the
-   pod is running; a fresh pod mounts the current Secret at start). The kubelet-refresh +
-   file-poll mechanics remain true and remain the fallback/upgrade path.**)**
-7. ~~**Signup ordering with AnkiWeb creds.**~~ **RESOLVED (2026-07-11, user):**
-   **later/optional confirmed** — login before or after create are both fine (advised before);
-   instance creation never blocks on AnkiWeb auth (the saga's step 2 always writes the tunnel
-   key; the hkey key only when provided). Login **after the pod is already running** picks up
-   via restart (`spec.restartedAt`, §5.5/§6.3). AnkiWeb login is never required for MCP (§5.7).
+6. ~~**Secret-write vs sidecar refresh.**~~ **MOOT (2026-07):** the sync-credentials channel
+   this item was about (Secret refresh / file-poll / restart-based pickup) was removed in v1
+   entirely — see the top banner and §6.3. The Secret object now carries only the tunnel token
+   (rotation = restart, §6.4).
+7. ~~**Signup ordering with AnkiWeb creds.**~~ **MOOT (2026-07):** there are no AnkiWeb creds
+   at signup — the user logs in inside Anki over VNC whenever they choose; instance creation
+   never involves AnkiWeb auth (the saga's step 2 writes only the tunnel key). AnkiWeb login is
+   never required for MCP (§5.7).

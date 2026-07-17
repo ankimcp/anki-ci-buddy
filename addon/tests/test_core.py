@@ -29,7 +29,7 @@ def test_merge_config_fills_defaults():
     assert merged["lock_preferences"] is False
     # untouched keys fall back to defaults
     assert merged["lock_addons"] is True
-    assert merged["credentials_path"] == "/run/ankimcp/sync-credentials.json"
+    assert merged["ensure_latex_generation"] is True
 
 
 def test_merge_config_none_is_all_defaults():
@@ -59,11 +59,28 @@ def test_action_lock_plan_respects_flags_and_keeps_note_types():
     assert plan["actionAdd_ons"] is True
     assert plan["actionImport"] is True
     assert plan["action_open_backup"] is True
+    # the v0.7.0 per-item File locks are on by default
+    assert plan["actionExport"] is True
+    assert plan["action_create_backup"] is True
+    assert plan["actionExit"] is True
     # Check for Updates (26.05+) is locked by default too
     assert plan["action_check_for_updates"] is True
     # defaults keep these enabled
     assert plan["actionNoteTypes"] is False
     assert plan["actionFullDatabaseCheck"] is False
+    # Switch Profile stays usable by default (multi-profile support, v0.7.0)
+    assert plan["actionSwitchProfile"] is False
+
+
+def test_new_file_locks_are_gateable():
+    plan = core.action_lock_plan(
+        core.merge_config(
+            {"lock_export": False, "lock_create_backup": False, "lock_exit": False}
+        )
+    )
+    assert plan["actionExport"] is False
+    assert plan["action_create_backup"] is False
+    assert plan["actionExit"] is False
 
 
 def test_note_types_never_in_lock_map_by_accident():
@@ -79,14 +96,44 @@ def test_check_for_updates_lock_is_gateable():
     assert plan["action_check_for_updates"] is False
 
 
-def test_menu_lock_plan_locks_file_menu_by_default():
-    # menuCol is the File menu's object name in aqt forms/main.ui.
-    assert core.menu_lock_plan(core.DEFAULT_CONFIG) == {"menuCol": True}
+def test_menu_lock_plan_keeps_file_menu_by_default():
+    # menuCol is the File menu's object name in aqt forms/main.ui. Since
+    # v0.7.0 (multi-profile support) the whole-menu lock is OFF by default —
+    # the per-item File locks leave only Switch Profile visible.
+    assert core.menu_lock_plan(core.DEFAULT_CONFIG) == {"menuCol": False}
 
 
-def test_menu_lock_plan_respects_gate_off():
-    plan = core.menu_lock_plan(core.merge_config({"lock_file_menu": False}))
-    assert plan == {"menuCol": False}
+def test_menu_lock_plan_respects_gate_on():
+    plan = core.menu_lock_plan(core.merge_config({"lock_file_menu": True}))
+    assert plan == {"menuCol": True}
+
+
+def test_profile_manager_lock_plan_locks_dangerous_buttons_by_default():
+    # Button object names verified against aqt forms/profiles.ui. Open / Add /
+    # Rename / Delete (login/add/rename/delete_2) are deliberately NOT in the
+    # map — users manage their own profiles.
+    assert core.profile_manager_lock_plan(core.DEFAULT_CONFIG) == {
+        "openBackup": True,
+        "quit": True,
+        "downgrade_button": True,
+    }
+
+
+def test_profile_manager_lock_plan_gates_are_individually_toggleable():
+    plan = core.profile_manager_lock_plan(
+        core.merge_config({"lock_profile_manager_quit": False})
+    )
+    assert plan == {
+        "openBackup": True,
+        "quit": False,
+        "downgrade_button": True,
+    }
+
+
+def test_profile_manager_lock_map_never_touches_profile_management_buttons():
+    # The kept buttons must never creep into the lock map by accident.
+    for kept in ("login", "add", "rename", "delete_2"):
+        assert kept not in core.PROFILE_MANAGER_LOCK_MAP.values()
 
 
 def test_update_check_setters_pin_the_pm_contract():
@@ -115,100 +162,6 @@ def test_locked_dialog_names_all_combos(lock_prefs, lock_addons, expected):
         {"lock_preferences": lock_prefs, "lock_addons": lock_addons}
     )
     assert core.locked_dialog_names(config) == expected
-
-
-# --- credentials parsing ------------------------------------------------- #
-
-
-def test_parse_valid_full_record():
-    creds = core.parse_credentials(
-        '{"v":1,"serial":7,"hkey":"abc","endpoint":"https://sync.ankiweb.net/",'
-        '"username":"u@example.com"}'
-    )
-    assert creds.serial == 7
-    assert creds.hkey == "abc"
-    assert creds.endpoint == "https://sync.ankiweb.net/"
-    assert creds.username == "u@example.com"
-
-
-def test_parse_minimal_record():
-    creds = core.parse_credentials('{"serial":1,"hkey":"k"}')
-    assert creds.endpoint is None
-    assert creds.username is None
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        "",  # empty
-        "not json",  # garbage
-        "{",  # partial
-        "[]",  # not an object
-        '{"serial":1}',  # missing hkey
-        '{"hkey":"k"}',  # missing serial
-        '{"serial":"1","hkey":"k"}',  # serial not int
-        '{"serial":true,"hkey":"k"}',  # bool serial rejected
-        '{"serial":1,"hkey":""}',  # empty hkey
-        '{"serial":1,"hkey":123}',  # hkey not str
-        '{"v":2,"serial":1,"hkey":"k"}',  # unknown version
-        '{"serial":1,"hkey":"k","endpoint":123}',  # endpoint wrong type
-    ],
-)
-def test_parse_rejects_bad_records(raw):
-    with pytest.raises(core.CredentialsError):
-        core.parse_credentials(raw)
-
-
-# --- serial comparison --------------------------------------------------- #
-
-
-def test_should_inject_first_time():
-    assert core.should_inject(1, None) is True
-
-
-def test_should_inject_only_on_increase():
-    assert core.should_inject(8, 7) is True
-    assert core.should_inject(7, 7) is False  # same
-    assert core.should_inject(6, 7) is False  # rollback
-
-
-# --- endpoint allowlist -------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    "endpoint,expected",
-    [
-        ("https://ankiweb.net/", True),
-        ("https://sync.ankiweb.net/", True),  # subdomain
-        ("https://sync.ankiuser.net/", True),
-        ("http://ankiweb.net/", True),  # http scheme allowed
-        ("https://evil.com/", False),
-        ("https://notankiweb.net/", False),  # not a real subdomain
-        ("https://ankiweb.net.evil.com/", False),  # suffix trick
-        ("ftp://ankiweb.net/", False),  # bad scheme
-        ("://broken", False),
-        ("", False),
-        ("https:///nopath", False),  # no host
-    ],
-)
-def test_endpoint_allowlist(endpoint, expected):
-    allowlist = ["ankiweb.net", "ankiuser.net"]
-    assert core.endpoint_allowed(endpoint, allowlist) is expected
-
-
-def test_endpoint_empty_allowlist_rejects_all():
-    assert core.endpoint_allowed("https://ankiweb.net/", []) is False
-
-
-# --- fingerprint --------------------------------------------------------- #
-
-
-def test_fingerprint_is_short_and_stable_and_hides_hkey():
-    hkey = "super-secret-hkey-value"
-    fp = core.hkey_fingerprint(hkey)
-    assert len(fp) == 8
-    assert fp == core.hkey_fingerprint(hkey)  # stable
-    assert hkey not in fp  # the secret is not in the fingerprint
 
 
 # --- toolbar sync link --------------------------------------------------- #

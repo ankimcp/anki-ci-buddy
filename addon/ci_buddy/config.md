@@ -3,7 +3,16 @@
 ci-buddy has two independent, config-gated modules:
 
 - **GUI lock** (Part A) — makes Anki a locked appliance.
-- **Provisioning** (Part B) — injects AnkiWeb sync credentials from a file.
+- **Config provisioners** — force managed-environment config the locked GUI can
+  no longer reach: collection-level LaTeX rendering, and hiding the sibling
+  AnkiMCP add-on's UI surfaces.
+
+ci-buddy **never touches AnkiWeb sync credentials**: the user logs into AnkiWeb
+manually inside Anki (over the VNC remote desktop), and — exactly like desktop
+Anki — that login persists in `prefs21.db` on the per-user persistent volume
+across pod restarts/sleep. It is wiped only when the instance (and its PVC) is
+deleted. (Earlier revisions injected an hkey from a mounted credentials file;
+that credential-provisioning channel was removed in v1.)
 
 Every behaviour below is individually toggleable. Unknown/typo keys are ignored
 with a warning printed to the container log (never a crash).
@@ -24,18 +33,61 @@ with a warning printed to the container log (never a crash).
 | `lock_preferences` | `true` | Tools → Preferences (`actionPreferences`) + programmatic `dialogs.open("Preferences")`. |
 | `lock_addons` | `true` | Tools → Add-ons (`actionAdd_ons`), the whole Add-ons dialog, and programmatic `dialogs.open("AddonsDialog")`. |
 | `lock_addon_config_writes` | `true` | Replaces `addonManager.writeConfig` with a shim that silently drops writes (config changes become non-durable). Reads are unaffected. |
-| `lock_profile_switch` | `true` | File → Switch Profile (`actionSwitchProfile`). |
+| `lock_profile_switch` | `false` | File → Switch Profile (`actionSwitchProfile`). **Unlocked by default since v0.7.0** — hosted users get multiple Anki profiles, so Switch Profile must stay usable. The screen it opens is locked down separately (see *Profile-manager screen* below). |
 | `lock_upgrade_downgrade` | `true` | Tools → Upgrade/Downgrade (`action_upgrade_downgrade`; usually already auto-hidden on headless/PyPI installs). |
 | `lock_check_for_updates` | `true` | Tools → Check for Updates (`action_check_for_updates`). The action only exists on Anki **26.05+** (25.07–25.09 only have `action_upgrade_downgrade`; ≤25.02 has neither) — on versions without it the lock is skipped with a logged warning, never a crash. |
 | `lock_note_types` | `false` | Tools → Manage Note Types (`actionNoteTypes`). **Kept enabled by default** — editing templates/CSS is an explicit product decision. |
 | `lock_import` | `true` | File → Import (`actionImport`). Destructive (can replace the collection) → locked by default. |
+| `lock_export` | `true` | File → Export (`actionExport`). Locked by default in the managed environment. |
+| `lock_create_backup` | `true` | File → Create Backup (`action_create_backup`). Locked by default (backups are the platform's job). |
 | `lock_open_backup` | `true` | File → Open Backup (`action_open_backup`). Destructive → locked by default. |
+| `lock_exit` | `true` | File → Exit (`actionExit`). Exiting Anki inside the pod just triggers a supervisor restart loop → locked by default. |
 | `lock_database_check` | `false` | Tools → Check Database (`actionFullDatabaseCheck`). Low-risk maintenance → unlocked by default; toggle to lock. |
-| `lock_file_menu` | `true` | The **entire File menu** (`menuCol`: Switch Profile / Import / Export / Create Backup / Open Backup / Exit). A QMenu is not a QAction, so it is locked via `menu.menuAction()` — `setVisible(False)` under `"hide"`, `setEnabled(False)` under `"disable"`. Subsumes the per-item File locks above; those remain useful when this is `false`. |
+| `lock_file_menu` | `false` | The **entire File menu** (`menuCol`: Switch Profile / Import / Export / Create Backup / Open Backup / Exit). A QMenu is not a QAction, so it is locked via `menu.menuAction()` — `setVisible(False)` under `"hide"`, `setEnabled(False)` under `"disable"`. **Unlocked by default since v0.7.0** (multi-profile support): with the default per-item locks above, the File menu shows **only Switch Profile**. Turning this on subsumes all the per-item File locks (including Switch Profile). |
 
 Every `mw.form` attribute above is accessed with `getattr(..., None)`: a
 missing/renamed action or menu on **any** Anki version is skipped with a logged
 warning — an outdated map entry can never crash startup.
+
+### Profile-manager screen (Part A, Seam 9)
+
+The screen File → Switch Profile opens (and the profile picker shown at startup
+when no profile auto-loads) is built from aqt `forms/profiles.ui` and carries
+buttons that must not be reachable in the managed environment:
+
+| Key | Default | Locks |
+|---|---|---|
+| `lock_profile_manager_open_backup` | `true` | The **Open Backup** button (`openBackup`) — destructive collection restore, the same surface as File → Open Backup. |
+| `lock_profile_manager_quit` | `true` | The **Quit** button (`quit`) — exits Anki inside the pod, which just triggers a supervisor restart loop. |
+| `lock_profile_manager_downgrade` | `true` | The **Downgrade & Quit** button (`downgrade_button`) — schema downgrade plus quit. |
+
+The **Open / Add / Rename / Delete** buttons (`login` / `add` / `rename` /
+`delete_2`) are **never touched**: hosted users manage their own profiles,
+including delete (product decision, v0.7.0). Locked buttons respect the global
+`hide_vs_disable` choice.
+
+> **Known limit.** Hiding `quit` doesn't close every exit path: the picker
+> window's own WM close button still runs `closeEvent → cleanupAndExit`
+> (`qt/aqt/main.py:293-300`) — the same class of gap as `lock_exit` not
+> blocking the main window's X. Supervisor restart tolerance covers it.
+
+**Timing / mechanism.** `AnkiQt.showProfileManager` rebuilds the screen
+**fresh on every call** (it assigns a new window and a new
+`aqt.forms.profiles.Ui_MainWindow` to `mw.profileDiag` / `mw.profileForm` —
+`qt/aqt/main.py:335-336`), so a one-shot lock would silently unlock on the
+next showing. ci-buddy therefore wraps `mw.showProfileManager` **at add-on
+load time** (same load-time precedent as Seam 7): add-ons import inside
+`AnkiQt.__init__` (`setupAddons`, main.py:212) *before* `setupProfile` runs
+and can show the startup picker (main.py:230-234, 327-328), and
+`main_window_did_init` only fires *after* that first showing — so a hook-time
+install would be too late. The wrapper calls the original, then locks the
+freshly built buttons; every show path (startup picker, File → Switch
+Profile via `unloadProfileAndShowProfileManager`, and the
+collection-load-failure fallback) goes through `self.showProfileManager`, so
+all showings are covered. Fail-open: a missing/renamed button — or a future
+Anki that reshapes `profiles.ui` or `showProfileManager` — degrades to
+"buttons visible" with a logged `lock skipped` warning, never a startup
+failure.
 
 ### Collection editing always stays usable
 
@@ -82,33 +134,23 @@ not touch AddCards, Browser, EditCurrent, FilteredDeckConfigDialog or DeckStats.
 > flag live — so the flag this option sets is already in effect for the very
 > first open/close auto-sync of the session.
 
-## Provisioning (Part B)
+## Collection config provisioning
 
 | Key | Default | Meaning |
 |---|---|---|
-| `provisioning_enabled` | `false` | Master switch for credential injection. **The hosted image sets this to `true`.** When `false`, ci-buddy registers no provisioning hooks. |
-| `credentials_path` | `"/run/ankimcp/sync-credentials.json"` | Path to the JSON credentials file (see contract below). |
-| `credentials_poll_seconds` | `2` | How often to poll the file's mtime for changes (floored at 0.5s). |
-| `endpoint_allowlist` | `["ankiweb.net", "ankiuser.net"]` | Allowed sync-server hosts (exact host or subdomain). An `endpoint` outside this list is ignored and the default sync server is kept. |
-| `clear_key_on_close` | `true` | On `profile_will_close`, clear the sync key from the profile so the at-rest `prefs21.db` carries no credential. Re-injected on next open. |
-
-### Collection config provisioning
-
-| Key | Default | Meaning |
-|---|---|---|
-| `ensure_latex_generation` | `true` | Forces the collection boolean `Config.Bool.RENDER_LATEX` **on**. Anki disables LaTeX image generation by default since 24.06 (security), so `[latex]`/TikZ cards otherwise show "LaTeX image generation is disabled in the preferences" and never compile. Since Preferences is locked on the hosted appliance, ci-buddy sets it in code — on `collection_did_load` **and** after every sync (`sync_did_finish`), because the value synced down from AnkiWeb may be off. Idempotent: it only writes when the flag is currently off, so it never re-dirties the collection. Independent of `provisioning_enabled`. |
+| `ensure_latex_generation` | `true` | Forces the collection boolean `Config.Bool.RENDER_LATEX` **on**. Anki disables LaTeX image generation by default since 24.06 (security), so `[latex]`/TikZ cards otherwise show "LaTeX image generation is disabled in the preferences" and never compile. Since Preferences is locked on the hosted appliance, ci-buddy sets it in code — on `collection_did_load` **and** after every sync (`sync_did_finish`), because the value synced down from AnkiWeb may be off. Idempotent: it only writes when the flag is currently off, so it never re-dirties the collection. |
 
 > **Note.** `ensure_latex_generation` only flips the global render flag. Rendering
 > TikZ additionally requires the note type to be in **SVG** mode with a
 > `tikz` + `dvisvgm` LaTeX preamble — that is note-type/collection data, not an
 > add-on setting, and is out of scope here.
 
-### Sibling add-on coordination
+## Sibling add-on coordination
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. Independent of `provisioning_enabled`. |
-| `hide_ankimcp_settings_menu_item` | `true` | Forces the AnkiMCP server add-on's `show_settings_menu_item` config key **off**, hiding its *AnkiMCP Server Settings…* entry from Anki's Tools menu in the managed environment. Independent of `provisioning_enabled`. |
+| `hide_ankimcp_toolbar_indicator` | `true` | Forces the AnkiMCP server add-on's `show_toolbar_indicator` config key **off**, hiding its persistent `[• AnkiMCP]` button from Anki's top toolbar in the managed environment. |
+| `hide_ankimcp_settings_menu_item` | `true` | Forces the AnkiMCP server add-on's `show_settings_menu_item` config key **off**, hiding its *AnkiMCP Server Settings…* entry from Anki's Tools menu in the managed environment. |
 
 These two gates cover independent AnkiMCP UI surfaces; each is applied only if
 its own flag is `true`. Both are forced in a **single** `getConfig`/`writeConfig`
@@ -142,25 +184,3 @@ key is already off (idempotent — never re-writes `meta.json`).
 > *before* AnkiMCP reads the flags. The surfaces are therefore hidden on the
 > **very first** window of the session (not just after a restart, which is what a
 > manual config edit would require).
-
-### Credentials file contract
-
-ci-buddy reads a single JSON file (written atomically by the operator / Secret
-mount) at `credentials_path`:
-
-```json
-{ "v": 1, "serial": 7, "hkey": "…", "endpoint": "https://sync.example.com/", "username": "user@example.com" }
-```
-
-- `v` — schema version, must be `1`.
-- `serial` — monotonic integer. ci-buddy re-injects **only when it increases**
-  (rollback-safe; not diffed by hkey string).
-- `hkey` — the AnkiWeb sync key (bearer token). **Never logged** — only a
-  sha256 fingerprint (first 8 hex) appears in logs.
-- `endpoint` — optional; omit for default AnkiWeb. Must pass the allowlist.
-- `username` — optional; display-only.
-
-A corrupt, partial, or absent file is a safe no-op — ci-buddy retries on the
-next poll. The hkey grants full read/write on the collection until the AnkiWeb
-password is rotated; treat any volume that holds it (including `prefs21.db`) as
-password-adjacent.

@@ -1,8 +1,10 @@
-"""ci-buddy — Anki appliance lock + sync-credential provisioning.
+"""ci-buddy — Anki appliance lock + managed-environment config provisioners.
 
 Entry point: read config, warn on unknown keys, install the writeConfig shim,
-and register the Part A (locks) and Part B (provisioning) hooks. Everything is
-wrapped so no failure here can crash Anki startup (fail open — spec §5).
+and register the locks and config-provisioner hooks. ci-buddy never touches
+AnkiWeb sync credentials — users log into AnkiWeb manually over VNC and the
+login persists on the per-user persistent volume. Everything is wrapped so no
+failure here can crash Anki startup (fail open — spec §5).
 
 Relative imports only (AnkiWeb installs use the numeric add-on id as the folder
 name, which would break absolute imports).
@@ -26,7 +28,7 @@ def _load() -> None:
 
     from aqt import mw
 
-    from . import core, locks, provisioning
+    from . import core, locks, provisioners
 
     # Read our own config early (the writeConfig shim only blocks *writes*, so
     # reads stay fine — but read before installing anything, to be safe).
@@ -41,17 +43,17 @@ def _load() -> None:
     config = core.merge_config(raw_config)
     core.warn_unknown_keys(config)
 
-    # Part A — GUI lock.
+    # GUI lock.
     try:
         locks.register(config)
     except Exception as exc:  # noqa: BLE001 — never crash startup
         print(f"[ci_buddy] failed to register locks: {exc!r}")
 
-    # Part B — provisioning (no-op unless provisioning_enabled).
+    # Config provisioners (RENDER_LATEX + AnkiMCP UI hide; each config-gated).
     try:
-        provisioning.register(config)
+        provisioners.register(config)
     except Exception as exc:  # noqa: BLE001 — never crash startup
-        print(f"[ci_buddy] failed to register provisioning: {exc!r}")
+        print(f"[ci_buddy] failed to register provisioners: {exc!r}")
 
 
 # Only run the aqt-dependent wiring when actually loaded inside Anki. Guarding on

@@ -1,8 +1,8 @@
 """Make the add-on package importable as ``ci_buddy`` without a running Anki.
 
 The add-on lives in ``addon/ci_buddy``; add ``addon/`` to ``sys.path`` so tests
-can ``import ci_buddy.core`` / ``ci_buddy.provisioning`` directly. Neither of
-those import paths touches ``aqt`` (provisioning imports it lazily), so the
+can ``import ci_buddy.core`` / ``ci_buddy.provisioners`` directly. Neither of
+those import paths touches ``aqt`` (the provisioners import it lazily), so the
 suite runs with stdlib + pytest only.
 """
 

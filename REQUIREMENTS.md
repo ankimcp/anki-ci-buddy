@@ -119,6 +119,16 @@ the link whose id is `sync`) and disable native auto-sync (in-memory `autoSync` 
 > link is also the user's AnkiWeb **login surface** (Part B): clicking Sync while logged
 > out opens Anki's stock sync-login prompt over VNC.
 
+### Seam 10 (config-gated, v0.8.0): unsupported-Anki warning — a warning, NOT a gate
+ci-buddy ships baked next to a pinned `aqt`, and every seam above is fail-open — so an
+unverified Anki degrades silently. On a version not in the hardcoded
+`SUPPORTED_ANKI_VERSIONS` matrix (`core.py`, exact `anki.buildinfo.version` strings; the
+shipped PyPI `anki==26.5` declares `'26.05'`), ci-buddy prints a loud multi-line stderr
+warning (greppable marker `CI_BUDDY_UNSUPPORTED_ANKI`) and shows a red bold banner in
+the deck browser plus a persistent toolbar badge. Anki still starts and all seams still
+apply. Operator workflow: verify the seams on the new Anki, add its version string to
+the matrix, release a new ci-buddy. Gated by `warn_unsupported_anki` (§4).
+
 ### Borderline actions — config-gated (default = locked)
 Destructive (can replace/destroy the whole collection): `actionImport` (File → Import),
 `action_open_backup` (File → Open Backup) → default **LOCK**. Low-risk maintenance:
@@ -193,7 +203,8 @@ platform decision 14):
   "lock_profile_manager_quit": true,
   "lock_profile_manager_downgrade": true,
   "strip_sync_link": false,
-  "disable_native_auto_sync": false
+  "disable_native_auto_sync": false,
+  "warn_unsupported_anki": true
 }
 ```
 

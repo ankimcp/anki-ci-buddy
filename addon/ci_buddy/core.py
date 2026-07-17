@@ -9,6 +9,7 @@ Kept deliberately dependency-free (stdlib only).
 
 from __future__ import annotations
 
+import html
 from typing import Any, Callable, Iterable
 
 # --------------------------------------------------------------------------- #
@@ -57,6 +58,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ensure_latex_generation": True,
     "hide_ankimcp_toolbar_indicator": True,
     "hide_ankimcp_settings_menu_item": True,
+    # Anki compatibility tripwire (v0.8.0, Seam 10): loud warning — never a
+    # gate — when the running Anki is not in SUPPORTED_ANKI_VERSIONS.
+    "warn_unsupported_anki": True,
 }
 
 #: Known config keys (used to warn about typos / stale keys — never crash).
@@ -390,3 +394,106 @@ def plan_hide_ankimcp_ui(
     for key in needed:
         new_config[key] = False
     return new_config
+
+
+# --------------------------------------------------------------------------- #
+# Seam 10 — Anki compatibility matrix (a WARNING, never a gate)
+# --------------------------------------------------------------------------- #
+
+#: The exact ``anki.buildinfo.version`` strings ci-buddy has been manually
+#: verified against. ci-buddy is baked into the managed image together with a
+#: pinned ``aqt``, and every lock seam is fail-open by design — so running on an
+#: unverified Anki silently degrades. This matrix is the tripwire: on any
+#: version NOT listed here, Seam 10 prints a loud CI_BUDDY_UNSUPPORTED_ANKI
+#: stderr warning and shows a red banner in the GUI. Anki still starts and
+#: every seam still applies normally.
+#:
+#: OPERATOR WORKFLOW: bump the image's pinned aqt → boot it → the warning shows
+#: during the VNC sanity check → manually verify every lock seam against the
+#: new Anki → add its exact version string here → release a new ci-buddy.
+#: EXACT match only — no ranges, no prefix magic: every Anki bump is a
+#: deliberate matrix edit.
+#:
+#: NOTE the version-string format: the PyPI wheel ``anki==26.5`` declares
+#: ``version = '26.05'`` in ``anki/buildinfo.py`` (zero-padded month, verified
+#: empirically from the shipped wheel) — NOT ``'26.5'``.
+SUPPORTED_ANKI_VERSIONS: tuple[str, ...] = ("26.05",)
+
+#: Greppable marker on every stderr line of the unsupported-Anki warning
+#: (stable token for pod-log grepping, like CI_BUDDY_DEBUG_CONSOLE_LOCK_FAILED).
+UNSUPPORTED_ANKI_MARKER = "CI_BUDDY_UNSUPPORTED_ANKI"
+
+
+def anki_version_supported(version: str | None) -> bool:
+    """True iff ``version`` is EXACTLY one of ``SUPPORTED_ANKI_VERSIONS``.
+
+    ``None``/empty (buildinfo unreadable) → unsupported. No normalisation —
+    ``"26.5"`` does not match ``"26.05"`` — because the matrix pins the literal
+    ``anki.buildinfo.version`` string and any drift must trip the warning.
+    """
+    if not version:
+        return False
+    return version in SUPPORTED_ANKI_VERSIONS
+
+
+def unsupported_anki_warning_lines(
+    found: str | None, ci_buddy_version: str
+) -> list[str]:
+    """The multi-line stderr warning for an unverified Anki, one string per
+    line, every line carrying the greppable ``UNSUPPORTED_ANKI_MARKER``.
+    """
+    found_label = found if found else "unknown"
+    prefix = f"[ci_buddy] {UNSUPPORTED_ANKI_MARKER}"
+    return [
+        f"{prefix} " + "=" * 60,
+        f"{prefix} ci-buddy {ci_buddy_version} is NOT verified against "
+        f"Anki {found_label}.",
+        f"{prefix} supported Anki versions: "
+        f"{', '.join(SUPPORTED_ANKI_VERSIONS)}",
+        f"{prefix} every lock seam is fail-open, so managed locks may be "
+        "silently degraded on this version.",
+        f"{prefix} This is a warning, not a gate — Anki starts and all seams "
+        "still apply.",
+        f"{prefix} verify all lock seams, then add this version to "
+        "SUPPORTED_ANKI_VERSIONS in core.py.",
+        f"{prefix} " + "=" * 60,
+    ]
+
+
+def unsupported_anki_banner_text(found: str | None, ci_buddy_version: str) -> str:
+    """The human-facing warning sentence shared by both GUI surfaces."""
+    found_label = found if found else "unknown"
+    return (
+        f"⚠ ci-buddy {ci_buddy_version} is NOT verified against Anki "
+        f"{found_label} — managed locks may be silently degraded. Test and "
+        "update the supported-versions matrix."
+    )
+
+
+def unsupported_anki_deck_banner_html(
+    found: str | None, ci_buddy_version: str
+) -> str:
+    """Big red bold banner ``<div>`` prepended to the deck-browser content
+    (the landing screen of the operator's VNC sanity check). Inline styles
+    only; the version strings are HTML-escaped."""
+    text = html.escape(unsupported_anki_banner_text(found, ci_buddy_version))
+    return (
+        '<div style="color:red;font-weight:bold;font-size:1.4em;'
+        'border:2px solid red;padding:12px;margin:8px;">'
+        f"{text}</div>"
+    )
+
+
+def unsupported_anki_toolbar_html(
+    found: str | None, ci_buddy_version: str
+) -> str:
+    """Small red bold non-link element appended to the top-toolbar links so
+    the warning persists on every screen. The toolbar hook's ``links`` is a
+    plain list of HTML strings joined with newlines (aqt/toolbar.py
+    ``_centerLinks``), so a ``<span>`` — deliberately NOT an ``<a>``/pycmd
+    link — is a valid entry. Full text goes in the tooltip."""
+    tooltip = html.escape(unsupported_anki_banner_text(found, ci_buddy_version))
+    return (
+        f'<span style="color:red;font-weight:bold;" title="{tooltip}">'
+        "⚠ unverified Anki</span>"
+    )

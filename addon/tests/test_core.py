@@ -352,3 +352,84 @@ def test_resolve_dir_multiple_matches_takes_first_and_logs():
     assert len(logs) == 1
     assert "multiple add-ons" in logs[0]
     assert "ankimcp" in logs[0]
+
+
+# --- Anki compatibility matrix (Seam 10) ---------------------------------- #
+
+
+def test_supported_versions_matrix_nonempty_and_pins_shipped_string():
+    # The matrix must never ship empty (that would flag EVERY Anki, including
+    # the pinned one) and must contain the exact buildinfo string of the
+    # shipped wheel: PyPI anki==26.5 declares version = '26.05' (zero-padded
+    # month) in anki/buildinfo.py — verified empirically from the wheel.
+    assert core.SUPPORTED_ANKI_VERSIONS  # non-empty guard
+    assert all(isinstance(v, str) and v for v in core.SUPPORTED_ANKI_VERSIONS)
+    assert "26.05" in core.SUPPORTED_ANKI_VERSIONS
+
+
+def test_anki_version_supported_exact_match_only():
+    assert core.anki_version_supported("26.05") is True
+    # no normalisation/prefix magic: the PyPI pin spelling and point releases
+    # do NOT match — every Anki bump is a deliberate matrix edit
+    assert core.anki_version_supported("26.5") is False
+    assert core.anki_version_supported("26.05.1") is False
+    assert core.anki_version_supported("25.09.2") is False
+
+
+def test_anki_version_supported_unknown_is_unsupported():
+    assert core.anki_version_supported(None) is False
+    assert core.anki_version_supported("") is False
+
+
+def test_unsupported_warning_lines_are_greppable_and_complete():
+    lines = core.unsupported_anki_warning_lines("27.01", "0.8.0")
+    assert len(lines) > 1  # loud: multi-line
+    # every line carries the stable marker, so any grep hit shows context
+    assert all(core.UNSUPPORTED_ANKI_MARKER in line for line in lines)
+    text = "\n".join(lines)
+    assert "27.01" in text  # found version
+    assert "0.8.0" in text  # ci-buddy version
+    for supported in core.SUPPORTED_ANKI_VERSIONS:
+        assert supported in text  # the supported list
+    # the operator instruction
+    assert "SUPPORTED_ANKI_VERSIONS" in text
+    assert "core.py" in text
+    # explicitly a warning, not a gate
+    assert "not a gate" in text
+
+
+def test_unsupported_warning_lines_none_version_reads_unknown():
+    text = "\n".join(core.unsupported_anki_warning_lines(None, "0.8.0"))
+    assert "Anki unknown" in text
+
+
+def test_deck_banner_html_is_big_red_bold_and_names_versions():
+    banner = core.unsupported_anki_deck_banner_html("27.01", "0.8.0")
+    assert "color:red" in banner
+    assert "font-weight:bold" in banner
+    assert "font-size" in banner  # the deck banner is the larger surface
+    assert "padding" in banner
+    assert "27.01" in banner
+    assert "0.8.0" in banner
+    assert "NOT verified" in banner
+
+
+def test_toolbar_html_is_red_bold_non_link():
+    badge = core.unsupported_anki_toolbar_html("27.01", "0.8.0")
+    assert "color:red" in badge
+    assert "font-weight:bold" in badge
+    # a plain element, not a toolbar link: no anchor, no pycmd bridge call
+    assert "<a " not in badge
+    assert "pycmd" not in badge
+    # the full sentence rides in the tooltip
+    assert 'title="' in badge
+    assert "27.01" in badge
+
+
+def test_banner_html_escapes_version_strings():
+    # a hostile/odd buildinfo string must not inject markup into the banner
+    banner = core.unsupported_anki_deck_banner_html('27<script>"x', "0.8.0")
+    assert "<script>" not in banner
+    assert "&lt;script&gt;" in banner
+    badge = core.unsupported_anki_toolbar_html('27<script>"x', "0.8.0")
+    assert "<script>" not in badge

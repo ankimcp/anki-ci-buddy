@@ -25,5 +25,6 @@
   "disable_native_auto_sync": false,
   "ensure_latex_generation": true,
   "hide_ankimcp_toolbar_indicator": true,
-  "hide_ankimcp_settings_menu_item": true
+  "hide_ankimcp_settings_menu_item": true,
+  "warn_unsupported_anki": true
 }

@@ -33,7 +33,8 @@ ci_buddy/
 ├── __init__.py       # entry: read config, install writeConfig shim, register hooks
 ├── locks.py          # GUI lock (does NOT import provisioners)
 ├── provisioners.py   # collection + sibling add-on config coercion (does NOT import locks)
-├── core.py           # pure logic, no aqt (config surface, lock plans)
+├── compat.py         # Seam 10: unsupported-Anki warning (a warning, never a gate)
+├── core.py           # pure logic, no aqt (config surface, lock plans, version matrix)
 ├── config.json       # defaults
 ├── config.md         # per-option documentation
 └── manifest.json
@@ -48,6 +49,11 @@ Notable defaults (conservative — a non-hosted user is never surprised):
 
 - `strip_sync_link` / `disable_native_auto_sync: false` — these stay `false`
   even in the hosted image (native auto-sync stays ON; see config.md).
+- `warn_unsupported_anki: true` — on an Anki version not in the hardcoded
+  verified matrix (`SUPPORTED_ANKI_VERSIONS` in `core.py`), print a loud
+  greppable stderr warning (`CI_BUDDY_UNSUPPORTED_ANKI`) and show a red banner
+  in the GUI. A **warning, not a gate**: Anki still starts and every seam still
+  applies (fail-open as usual). See config.md, Seam 10.
 
 ## Build
 

@@ -28,7 +28,7 @@ def _load() -> None:
 
     from aqt import mw
 
-    from . import core, locks, provisioners
+    from . import compat, core, locks, provisioners
 
     # Read our own config early (the writeConfig shim only blocks *writes*, so
     # reads stay fine — but read before installing anything, to be safe).
@@ -42,6 +42,14 @@ def _load() -> None:
 
     config = core.merge_config(raw_config)
     core.warn_unknown_keys(config)
+
+    # Seam 10: unsupported-Anki tripwire (a warning, never a gate) — first, so
+    # the CI_BUDDY_UNSUPPORTED_ANKI stderr lines lead the pod log even if a
+    # later registration fails.
+    try:
+        compat.register(config)
+    except Exception as exc:  # noqa: BLE001 — never crash startup
+        print(f"[ci_buddy] failed to register compat warning: {exc!r}")
 
     # GUI lock.
     try:

@@ -184,3 +184,48 @@ key is already off (idempotent — never re-writes `meta.json`).
 > *before* AnkiMCP reads the flags. The surfaces are therefore hidden on the
 > **very first** window of the session (not just after a restart, which is what a
 > manual config edit would require).
+
+## Anki compatibility warning (Seam 10)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `warn_unsupported_anki` | `true` | Warns — **loudly, but without blocking anything** — when ci-buddy runs on an Anki version that is not in its hardcoded verified matrix (`SUPPORTED_ANKI_VERSIONS` in `core.py`). |
+
+ci-buddy is baked into the managed image together with a pinned `aqt`, and every
+lock seam above is **fail-open by design** — so on an unverified Anki the locks
+can silently degrade with no visible symptom. Seam 10 is the tripwire for the
+operator's manual image sanity check. At add-on load time it reads
+`anki.buildinfo.version` (the same runtime source Anki's own
+`anki.utils.version_with_build` uses) and compares it — **exact string match
+only**, no ranges or prefixes — against the matrix. A missing/unreadable
+`buildinfo` counts as unsupported. On a mismatch:
+
+- **stderr (pod logs):** a multi-line warning, every line carrying the stable
+  greppable marker `CI_BUDDY_UNSUPPORTED_ANKI`, stating the found Anki version,
+  the ci-buddy version (read from `manifest.json`), the supported list, and the
+  instruction to verify all lock seams and add the version to
+  `SUPPORTED_ANKI_VERSIONS` in `core.py`.
+- **Deck browser:** a big red bold banner prepended above the deck list
+  (`deck_browser_will_render_content`) — the landing screen of the VNC sanity
+  check.
+- **Top toolbar:** a persistent red bold "⚠ unverified Anki" badge appended to
+  the toolbar links (`top_toolbar_did_init_links`), so the warning stays visible
+  on every screen; the full sentence is in its tooltip.
+
+**This is a warning, NOT a gate.** Anki still starts, and every seam above
+still applies normally (fail-open as usual) — nothing is blocked or disabled by
+Seam 10. On a **supported** version the seam is completely silent: no output,
+no hooks registered.
+
+**Operator workflow.** Bump the image's pinned `aqt` → boot the candidate image
+→ the warning shows during the VNC sanity check → manually verify every lock
+seam against the new Anki → add its exact `anki.buildinfo.version` string to
+`SUPPORTED_ANKI_VERSIONS` in `core.py` → release a new ci-buddy. Mind the
+format: PyPI `anki==26.5` declares `version = '26.05'` (zero-padded month) —
+the matrix pins the buildinfo spelling, not the pip pin.
+
+Fail-open like everything else: a future Anki that removes/reshapes either hook
+or the deck-browser content object degrades to "no banner" with a logged
+`warning surface skipped` / `banner skipped` line (the stderr warning has
+already been printed by then), never a crash. The single config key gates the
+whole feature — stderr and both GUI surfaces.

@@ -83,8 +83,8 @@ def test_read_anki_version_none_when_not_a_string(monkeypatch):
 
 def test_read_ci_buddy_version_reads_shipped_manifest():
     # single source of truth: the banner version comes from manifest.json —
-    # this also pins the v0.8.0 release bump.
-    assert compat.read_ci_buddy_version() == "0.8.0"
+    # this also pins the v0.8.1 release bump.
+    assert compat.read_ci_buddy_version() == "0.8.1"
 
 
 # --------------------------------------------------------------------------- #

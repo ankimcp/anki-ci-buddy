@@ -368,6 +368,9 @@ def test_supported_versions_matrix_nonempty_and_pins_shipped_string():
     # anki==26.8.1 declares version = '26.08.1' — verified from the wheel
     # (buildhash 39e4b0b4) during the 0.8.1 seam re-verification.
     assert "26.08.1" in core.SUPPORTED_ANKI_VERSIONS
+    # anki==26.9 declares version = '26.09' — verified from the wheel
+    # (buildhash e62e7739) during the 0.8.2 seam re-verification.
+    assert "26.09" in core.SUPPORTED_ANKI_VERSIONS
 
 
 def test_anki_version_supported_exact_match_only():

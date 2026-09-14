@@ -57,7 +57,7 @@ def install_fake_gui_hooks(monkeypatch, *drop_hooks):
     return hooks
 
 
-SUPPORTED = core.SUPPORTED_ANKI_VERSIONS[0]  # "26.05" — the shipped pin
+SUPPORTED = core.SUPPORTED_ANKI_VERSIONS[0]  # oldest matrix entry; any entry works
 
 
 # --------------------------------------------------------------------------- #
@@ -83,8 +83,8 @@ def test_read_anki_version_none_when_not_a_string(monkeypatch):
 
 def test_read_ci_buddy_version_reads_shipped_manifest():
     # single source of truth: the banner version comes from manifest.json —
-    # this also pins the v0.8.1 release bump.
-    assert compat.read_ci_buddy_version() == "0.8.1"
+    # this also pins the v0.8.2 release bump.
+    assert compat.read_ci_buddy_version() == "0.8.2"
 
 
 # --------------------------------------------------------------------------- #

@@ -3,7 +3,7 @@
 Implementation spec for a small Anki add-on that (A) **locks the GUI** of a hosted / CI
 Anki instance and (B) **forces managed-environment config** the locked GUI can no longer
 reach (collection LaTeX rendering, sibling add-on UI). Written for an implementing agent.
-Target: **PyPI `aqt` 26.9 (the headless-anki image pin), Python 3.12+**; verified
+Target: **PyPI `aqt` 26.9.2 (the headless-anki image pin), Python 3.12+**; verified
 Anki versions are the exact-match matrix `SUPPORTED_ANKI_VERSIONS` in `core.py`. Line
 numbers below are guidance, not contracts — resolve symbols by name.
 
@@ -311,11 +311,24 @@ coverage you don't have.
 
 ---
 
-## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.9 — verify by symbol)
+## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.9.2 — verify by symbol)
 
 > **Re-verification note (2026-09-14):** all ten seams were re-verified by source diff
 > against aqt 26.9 (buildhash e62e7739); the reference points below were not re-checked
 > line by line — verify by symbol.
+
+> **Re-verification note (2026-09-18):** all ten seams were re-verified by source diff
+> against aqt 26.9.2 (buildhash bb0dd6d1) vs 26.9. The only changed Python source in aqt
+> is `aqt/webview.py` (new `_is_internal_url()`; `AuthInterceptor.interceptRequest` and
+> `AnkiWebPage.acceptNavigationRequest` tightened to Anki's own server authority) — a
+> subsystem ci-buddy does not touch. The bundled `_aqt/data/web/sveltekit/` assets were
+> also rebuilt (rehashed chunk filenames, `version.json`, `index.html` CSP hash/preloads);
+> after normalising chunk names the content is identical apart from minifier identifier
+> renames — a rebuild artifact, no behaviour change. `gui_hooks`, `_aqt/hooks.py`, and
+> all generated forms are byte-identical. In the `anki` package only `buildinfo.py` and
+> the compiled `_rsbridge` binary differ; the binary can't be source-diffed and is outside
+> the scope of this verification. The reference points below were not re-checked line by
+> line — verify by symbol.
 
 - `actionPreferences` → `main.py onPrefs` → `dialogs.open("Preferences", mw)`;
   `Preferences(QDialog)` in `preferences.py` (sync login/logout + custom URL live here).

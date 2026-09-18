@@ -24,7 +24,7 @@ nothing here can crash Anki startup or block the collection.
 Full spec: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Platform context:
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-Target: PyPI `aqt` 26.9 (the headless-anki image pin), Python 3.12+; verified Anki
+Target: PyPI `aqt` 26.9.2 (the headless-anki image pin), Python 3.12+; verified Anki
 versions are the exact-match matrix `SUPPORTED_ANKI_VERSIONS` in `core.py`.
 
 ## Layout

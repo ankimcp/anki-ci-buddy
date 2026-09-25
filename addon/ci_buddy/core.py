@@ -417,7 +417,13 @@ def plan_hide_ankimcp_ui(
 #: NOTE the version-string format: the PyPI wheel ``anki==26.5`` declares
 #: ``version = '26.05'`` in ``anki/buildinfo.py`` (zero-padded month, verified
 #: empirically from the shipped wheel) — NOT ``'26.5'``.
-SUPPORTED_ANKI_VERSIONS: tuple[str, ...] = ("26.05", "26.08.1", "26.09", "26.09.2")
+SUPPORTED_ANKI_VERSIONS: tuple[str, ...] = (
+    "26.05",
+    "26.08.1",
+    "26.09",
+    "26.09.2",
+    "26.09.3",
+)
 
 #: Greppable marker on every stderr line of the unsupported-Anki warning
 #: (stable token for pod-log grepping, like CI_BUDDY_DEBUG_CONSOLE_LOCK_FAILED).

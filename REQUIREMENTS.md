@@ -3,7 +3,7 @@
 Implementation spec for a small Anki add-on that (A) **locks the GUI** of a hosted / CI
 Anki instance and (B) **forces managed-environment config** the locked GUI can no longer
 reach (collection LaTeX rendering, sibling add-on UI). Written for an implementing agent.
-Target: **PyPI `aqt` 26.9.2 (the headless-anki image pin), Python 3.12+**; verified
+Target: **PyPI `aqt` 26.9.3 (the headless-anki image pin), Python 3.12+**; verified
 Anki versions are the exact-match matrix `SUPPORTED_ANKI_VERSIONS` in `core.py`. Line
 numbers below are guidance, not contracts — resolve symbols by name.
 
@@ -311,7 +311,7 @@ coverage you don't have.
 
 ---
 
-## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.9.2 — verify by symbol)
+## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.9.3 — verify by symbol)
 
 > **Re-verification note (2026-09-14):** all ten seams were re-verified by source diff
 > against aqt 26.9 (buildhash e62e7739); the reference points below were not re-checked
@@ -326,6 +326,35 @@ coverage you don't have.
 > after normalising chunk names the content is identical apart from minifier identifier
 > renames — a rebuild artifact, no behaviour change. `gui_hooks`, `_aqt/hooks.py`, and
 > all generated forms are byte-identical. In the `anki` package only `buildinfo.py` and
+> the compiled `_rsbridge` binary differ; the binary can't be source-diffed and is outside
+> the scope of this verification. The reference points below were not re-checked line by
+> line — verify by symbol.
+
+> **Re-verification note (2026-09-25):** all ten seams were re-verified by source diff
+> against aqt 26.9.3 (buildhash 29bb700b) vs 26.9.2. Per the upstream release notes,
+> 26.9.3 carries no security fix of its own — those landed in 26.9 and 26.9.2. Three
+> Python files changed in aqt, none touched by ci-buddy: `aqt/__init__.py` moves the
+> `safeMode` computation from `AnkiQt.__init__` into `AnkiApp.__init__` (the `QApplication`
+> subclass) so it is known before the profile manager loads, and gates the video driver
+> to `VideoDriver.Software` in safe mode. The flag's source also changes: it used to come
+> from argparse's `self.opts.safemode`, now it's a raw `"--safemode" in argv` check (plus
+> the Shift-key modifier) — so argparse prefix abbreviations like `--safe` no longer
+> trigger it. Safe mode (Shift at launch or `--safemode`) skips all add-ons, including
+> ci-buddy, so it disables the entire lock; 26.9.3 leaves those two triggers unchanged.
+> `aqt/__init__.py` also reorders startup: `setupGL(...)` and
+> `os.environ["QT_SCALE_FACTOR"] = ...` now run after `app = AnkiApp(argv)` (in 26.9.2
+> they ran before the `QApplication` was created) — doesn't touch any lock seam, but
+> worth checking UI scale over VNC in the headless image. `aqt/main.py` just reads
+> `self.app.safeMode` instead of recomputing it — `showProfileManager` itself is
+> unchanged; `aqt/preferences.py` reworks `Preferences.update_video_driver()` to return a
+> bool instead of showing its own restart-required dialog, and suppresses the
+> experiments-dirty restart check while in safe mode. The bundled
+> `_aqt/data/web/sveltekit/` assets were also rebuilt (rehashed chunk filenames,
+> `version.json`, `index.html` CSP hash/preloads); after normalising hashed chunk names,
+> what remains is minifier identifier renames, the `__sveltekit` build id, `version.json`,
+> and the CSP hash — a rebuild artifact, no behaviour change. `gui_hooks`,
+> `_aqt/hooks.py`, and all generated forms (including `forms/main.py` and
+> `forms/profiles.py`) are byte-identical. In the `anki` package only `buildinfo.py` and
 > the compiled `_rsbridge` binary differ; the binary can't be source-diffed and is outside
 > the scope of this verification. The reference points below were not re-checked line by
 > line — verify by symbol.

@@ -146,6 +146,20 @@ item stays under its own key (`lock_import`), so **both** `lock_import` and
 dialog. Drag-and-drop of a file onto the Decks screen (`MainWebView.dropEvent`) is not
 covered by either key.
 
+### Seam 12 (config-gated, v0.10.0): profile-picker auto-reopen
+On the hosted appliance the AnkiMCP add-on's HTTP server runs only while a profile is
+open; closing a profile (File → Switch Profile) stops it and nothing restarts it until
+a profile opens again, so a user who leaves the picker showing locks themselves out of
+MCP until a pod restart (anki-mcp-saas#73). Decision (2026-10-20): when the picker has
+been showing for N seconds with no profile open, reopen the selected profile — the one
+that was open before unless the user moved the selection — as if **Open** were clicked;
+no Switch Profile lockout, no liveness probe. Mechanism: `gui_hooks.state_did_change`
+(every path to the picker runs `moveToState("profileManager")`; a successful open moves
+to `deckBrowser`) arms / stops one single-shot `QTimer`; on fire, `mw.onOpenProfile()`
+(verified identical across aqt 26.5–26.9.3). A visible modal re-arms instead of
+interrupting; a failed open shows the picker again, which re-arms (retry bounded by N).
+Gated by `auto_reopen_profile_after_s` (§4; default 180, `0` disables).
+
 ### Borderline actions — config-gated (default = locked)
 Destructive (can replace/destroy the whole collection): `actionImport` (File → Import),
 `action_open_backup` (File → Open Backup) → default **LOCK**. Low-risk maintenance:
@@ -221,6 +235,7 @@ platform decision 14):
   "lock_profile_manager_downgrade": true,
   "lock_deck_browser_get_shared": true,
   "lock_deck_browser_import": true,
+  "auto_reopen_profile_after_s": 180,
   "strip_sync_link": false,
   "disable_native_auto_sync": false,
   "warn_unsupported_anki": true
@@ -321,6 +336,9 @@ coverage you don't have.
       profile-manager screen's dangerous buttons locked; `writeConfig` neutered.
 - [ ] Add / Browse / Study / Decks / Stats / Note Types still open and work.
 - [ ] Programmatic `dialogs.open("Preferences"|"AddonsDialog")` disabled; other dialogs unaffected.
+- [ ] File → Switch Profile, leave the picker idle: after 180 s the previous profile
+      reopens on its own and the AnkiMCP port is listening again; an Add/Rename prompt
+      left open is not interrupted.
 - [ ] Decks screen bottom bar shows only Create Deck (no Get Shared / Import File), and
       Create Deck still works.
 - [ ] ci-buddy never reads/writes/clears any sync credential (Part B): a manual AnkiWeb

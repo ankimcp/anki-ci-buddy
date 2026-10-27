@@ -20,6 +20,7 @@
   "lock_profile_manager_downgrade": true,
   "lock_deck_browser_get_shared": true,
   "lock_deck_browser_import": true,
+  "auto_reopen_profile_after_s": 180,
   "lock_debug_console": true,
   "sanitize_copy_debug_info": true,
   "disable_update_checks": true,

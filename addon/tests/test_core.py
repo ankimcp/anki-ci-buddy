@@ -481,3 +481,23 @@ def test_banner_html_escapes_version_strings():
     assert "&lt;script&gt;" in banner
     badge = core.unsupported_anki_toolbar_html('27<script>"x', "0.8.0")
     assert "<script>" not in badge
+
+
+# --------------------------------------------------------------------------- #
+# Seam 12 — profile-picker auto-reopen delay
+# --------------------------------------------------------------------------- #
+
+
+def test_auto_reopen_delay_default_is_180s():
+    assert core.auto_reopen_profile_delay_ms(core.DEFAULT_CONFIG) == 180_000
+
+
+@pytest.mark.parametrize("value", [0, -5, True, False, "180", None, [180]])
+def test_auto_reopen_delay_disabled_for_non_positive_or_non_numeric(value):
+    config = core.merge_config({"auto_reopen_profile_after_s": value})
+    assert core.auto_reopen_profile_delay_ms(config) == 0
+
+
+def test_auto_reopen_delay_accepts_fractional_seconds():
+    config = core.merge_config({"auto_reopen_profile_after_s": 2.5})
+    assert core.auto_reopen_profile_delay_ms(config) == 2500

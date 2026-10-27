@@ -950,6 +950,7 @@ def _install_fake_aqt_for_register(monkeypatch, pm):
         addons_dialog_will_show=_FakeHook(),
         top_toolbar_did_init_links=_FakeHook(),
         profile_did_open=_FakeHook(),
+        state_did_change=_FakeHook(),
     )
     aqt_mod = types.ModuleType("aqt")
     aqt_mod.gui_hooks = hooks
@@ -1134,3 +1135,177 @@ def test_register_deck_browser_import_failure_fails_open(monkeypatch, capsys):
     assert "remove_deck_browser_buttons failed" in capsys.readouterr().out
     assert locks._original_deck_browser_draw_links is None
     assert len(hooks.top_toolbar_did_init_links.handlers) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Seam 12 — profile-picker auto-reopen
+# --------------------------------------------------------------------------- #
+
+
+class _FakeSignal:
+    def __init__(self):
+        self.slots = []
+
+    def connect(self, fn):
+        self.slots.append(fn)
+
+    def emit(self):
+        for fn in self.slots:
+            fn()
+
+
+class _FakeTimer:
+    """QTimer stand-in: records start/stop and lets tests fire ``timeout``."""
+
+    def __init__(self):
+        self.single_shot = False
+        self.started_with: list[int] = []
+        self.stopped = 0
+        self.timeout = _FakeSignal()
+
+    def setSingleShot(self, value):
+        self.single_shot = value
+
+    def start(self, ms):
+        self.started_with.append(ms)
+
+    def stop(self):
+        self.stopped += 1
+
+    def fire(self):
+        self.timeout.emit()
+
+
+def _install_fake_aqt_for_auto_reopen(monkeypatch, *, modal=None):
+    """Fake ``aqt`` + ``aqt.qt`` with the surface Seam 12 touches: ``mw.state``,
+    ``mw.onOpenProfile``, ``QTimer`` and ``QApplication.activeModalWidget``."""
+    monkeypatch.setattr(locks, "_auto_reopen_timer", None)
+    opens: list[str] = []
+    mw = types.SimpleNamespace(state="profileManager")
+    mw.onOpenProfile = lambda: opens.append(mw.state)
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.mw = mw
+    qt_mod = types.ModuleType("aqt.qt")
+    qt_mod.QTimer = _FakeTimer
+    qt_mod.QApplication = types.SimpleNamespace(activeModalWidget=lambda: modal)
+    aqt_mod.qt = qt_mod
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+    monkeypatch.setitem(sys.modules, "aqt.qt", qt_mod)
+    return mw, opens
+
+
+def test_auto_reopen_arms_single_shot_timer_on_profile_manager_state(monkeypatch):
+    _install_fake_aqt_for_auto_reopen(monkeypatch)
+
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+
+    timer = locks._auto_reopen_timer
+    assert timer.single_shot is True
+    assert timer.started_with == [180_000]
+
+
+def test_auto_reopen_stops_timer_when_leaving_profile_manager(monkeypatch):
+    _install_fake_aqt_for_auto_reopen(monkeypatch)
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+    timer = locks._auto_reopen_timer
+
+    locks.on_state_did_change("deckBrowser", "profileManager", 180_000)
+
+    assert timer.stopped == 1
+    # Only one timer ever exists: a second picker showing restarts it.
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+    assert locks._auto_reopen_timer is timer
+    assert timer.started_with == [180_000, 180_000]
+
+
+def test_auto_reopen_leaving_before_any_picker_is_noop(monkeypatch):
+    _install_fake_aqt_for_auto_reopen(monkeypatch)
+
+    locks.on_state_did_change("deckBrowser", "startup", 180_000)
+
+    assert locks._auto_reopen_timer is None
+
+
+def test_auto_reopen_fires_open_profile_while_picker_idle(monkeypatch, capsys):
+    mw, opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+
+    locks._auto_reopen_timer.fire()
+
+    assert opens == ["profileManager"]
+    assert "reopening the last profile" in capsys.readouterr().out
+
+
+def test_auto_reopen_does_nothing_once_anki_left_the_picker(monkeypatch):
+    # Timer fired late (state already moved on without the hook stopping it):
+    # never call onOpenProfile outside the picker.
+    mw, opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+    mw.state = "deckBrowser"
+
+    locks._auto_reopen_timer.fire()
+
+    assert opens == []
+
+
+def test_auto_reopen_rearms_instead_of_interrupting_a_modal(monkeypatch):
+    # The user is mid Add/Rename/Delete prompt: wait another full delay.
+    mw, opens = _install_fake_aqt_for_auto_reopen(monkeypatch, modal=object())
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+    timer = locks._auto_reopen_timer
+
+    timer.fire()
+
+    assert opens == []
+    assert timer.started_with == [180_000, 180_000]
+
+
+def test_auto_reopen_missing_on_open_profile_warns_not_crashes(
+    monkeypatch, capsys
+):
+    mw, _opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
+    del mw.onOpenProfile
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+
+    locks._auto_reopen_timer.fire()
+
+    assert "profile auto-reopen skipped" in capsys.readouterr().out
+
+
+def test_auto_reopen_open_profile_failure_is_contained(monkeypatch, capsys):
+    # onOpenProfile raising must not propagate out of the Qt timer slot.
+    mw, _opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
+
+    def boom():
+        raise RuntimeError("load failed")
+
+    mw.onOpenProfile = boom
+    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+
+    locks._auto_reopen_timer.fire()
+
+    assert "_profile_picker_idle failed" in capsys.readouterr().out
+
+
+def test_register_wires_auto_reopen_with_default_delay(monkeypatch):
+    hooks = _install_fake_aqt_for_register(monkeypatch, FakePM())
+    monkeypatch.setattr(locks, "_auto_reopen_timer", None)
+    qt_mod = types.ModuleType("aqt.qt")
+    qt_mod.QTimer = _FakeTimer
+    monkeypatch.setitem(sys.modules, "aqt.qt", qt_mod)
+
+    locks.register(core.merge_config(_REGISTER_BASE))
+
+    assert len(hooks.state_did_change.handlers) == 1
+    hooks.state_did_change.handlers[0]("profileManager", "startup")
+    assert locks._auto_reopen_timer.started_with == [180_000]
+
+
+def test_register_zero_delay_leaves_auto_reopen_off(monkeypatch):
+    hooks = _install_fake_aqt_for_register(monkeypatch, FakePM())
+
+    locks.register(
+        core.merge_config(dict(_REGISTER_BASE, auto_reopen_profile_after_s=0))
+    )
+
+    assert hooks.state_did_change.handlers == []

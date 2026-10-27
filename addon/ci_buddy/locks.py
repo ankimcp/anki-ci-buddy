@@ -606,6 +606,84 @@ def remove_deck_browser_buttons(config: dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seam 12 (config-gated) — profile-picker auto-reopen
+# --------------------------------------------------------------------------- #
+
+#: The single-shot QTimer that reopens the last profile. Module-level so the
+#: handlers share one timer and a re-registration never leaves a second one
+#: running. Populated lazily on the first ``profileManager`` state.
+_auto_reopen_timer: Any = None
+
+
+def _profile_picker_idle(delay_ms: int) -> None:
+    """Timer callback (Seam 12): the picker has been showing for ``delay_ms``
+    with no profile open — reopen the last profile via ``mw.onOpenProfile``.
+
+    ``onOpenProfile`` hides the picker and runs ``loadProfile`` on whatever
+    ``pm`` currently holds (verified against aqt 26.5–26.9.3, ``qt/aqt/main.py``):
+    ``refreshProfilesList`` selects the previously open profile and
+    ``onProfileRowChange`` already ``pm.load``s the selected row, so this is
+    exactly "reopen the last profile" — or the row the user moved to. A
+    successful load fires ``profile_did_open``, which is what restarts the
+    AnkiMCP add-on's HTTP server (anki-mcp-saas#73).
+
+    Guards: nothing happens if Anki has already left the picker state. If a
+    modal is up (the Add/Rename prompt, a confirmation), the user is mid-task:
+    re-arm for another full delay rather than yank the picker from under
+    them. If the load fails, aqt shows the picker again, which re-arms via
+    ``state_did_change`` — so the retry cadence is bounded by ``delay_ms``.
+    """
+    from aqt import mw  # lazy — keeps this module import-safe for tests
+    from aqt.qt import QApplication
+
+    if getattr(mw, "state", None) != core.PROFILE_MANAGER_STATE:
+        return
+    if QApplication.activeModalWidget() is not None:
+        _auto_reopen_timer.start(delay_ms)
+        return
+    open_profile = getattr(mw, "onOpenProfile", None)
+    if not callable(open_profile):
+        print(
+            "[ci_buddy] warning: mw.onOpenProfile not present on this Anki "
+            "version (profile auto-reopen skipped)"
+        )
+        return
+    print(
+        f"[ci_buddy] profile picker idle for {delay_ms // 1000}s — reopening "
+        "the last profile"
+    )
+    open_profile()
+
+
+def on_state_did_change(new_state: str, _old_state: str, delay_ms: int) -> None:
+    """Arm the auto-reopen timer when Anki enters the profile picker, stop it
+    when Anki leaves (Seam 12).
+
+    Every path to the picker — startup with no auto-loaded profile, File →
+    Switch Profile, and the collection-load-failure fallback — goes through
+    ``showProfileManager`` → ``moveToState("profileManager")``, which fires
+    ``state_did_change``; a successful profile open moves to ``deckBrowser``
+    and fires it again. One hook therefore covers arm and disarm.
+    """
+    global _auto_reopen_timer
+
+    if new_state != core.PROFILE_MANAGER_STATE:
+        if _auto_reopen_timer is not None:
+            _auto_reopen_timer.stop()
+        return
+
+    if _auto_reopen_timer is None:
+        from aqt.qt import QTimer
+
+        timer = QTimer()
+        timer.setSingleShot(True)
+        on_idle = _safe(_profile_picker_idle)
+        timer.timeout.connect(lambda: on_idle(delay_ms))
+        _auto_reopen_timer = timer
+    _auto_reopen_timer.start(delay_ms)
+
+
+# --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
 
@@ -679,6 +757,16 @@ def register(config: dict[str, Any]) -> None:
     # before the first _drawButtons, with no dependency on hook ordering.
     if any(core.deck_browser_button_lock_plan(config).values()):
         _safe(remove_deck_browser_buttons)(config)
+
+    # Seam 12: reopen the last profile when the picker sits idle. A hook, not
+    # a load-time patch: state_did_change fires on every entry to and exit
+    # from the picker, including the startup showing (hooks are appended
+    # during setupAddons, before setupProfile runs).
+    delay_ms = core.auto_reopen_profile_delay_ms(config)
+    if delay_ms > 0:
+        gui_hooks.state_did_change.append(
+            _safe(lambda new, old: on_state_did_change(new, old, delay_ms))
+        )
 
     # Seam 5: sync surfaces (config-gated; conservative defaults).
     if config.get("strip_sync_link", False):

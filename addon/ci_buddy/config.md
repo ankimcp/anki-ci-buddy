@@ -112,6 +112,30 @@ event-loop timing detail, not a contract). Fail-open: a missing/reshaped
 `drawLinks`, or a command that no longer exists, is a logged `lock skipped`
 warning, never a crash.
 
+### Profile-picker auto-reopen (Part A, Seam 12)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `auto_reopen_profile_after_s` | `180` | When the profile picker (the screen File → Switch Profile opens) has been showing for this many seconds with no profile open, ci-buddy reopens the selected profile — the one that was open before, unless the user moved the selection — exactly as if the user had clicked **Open**. `0` (or any non-positive / non-numeric value) disables it. |
+
+Why: on the hosted appliance, closing a profile stops the AnkiMCP add-on's
+HTTP server (it only runs while a profile is open), and nothing restarts it
+until a profile opens again — so a user who switches to the picker and walks
+away locks themselves out of MCP until someone restarts the pod
+([anki-mcp-saas#73](https://github.com/ankimcp/anki-mcp-saas/issues/73)).
+Reopening the profile fires `profile_did_open`, which is what brings the server
+back. Profile switching stays fully available; this only bounds how long the
+picker can sit idle.
+
+Mechanism: `gui_hooks.state_did_change` — every path to the picker goes through
+`moveToState("profileManager")`, and a successful open moves to `deckBrowser`,
+so one hook arms a single-shot `QTimer` on entry and stops it on exit. When the
+timer fires it calls `mw.onOpenProfile()`. If a modal is up (the Add / Rename
+prompt, a delete confirmation) the user is mid-task, so the timer re-arms for
+another full delay instead of interrupting. If the open fails, aqt shows the
+picker again, which re-arms — so a broken profile retries once per delay, never
+in a tight loop. Fail-open: a missing `mw.onOpenProfile` is a logged skip.
+
 ### Collection editing always stays usable
 
 Add, Browse, Study/Review, Decks, Stats, per-deck options, Undo/Redo, and Manage

@@ -60,6 +60,10 @@ Notable defaults (conservative — a non-hosted user is never surprised):
   (Create Deck stays). The Import File button opens the same dialog as File →
   Import, so **both** `lock_import` and `lock_deck_browser_import` are needed to
   close every entry point to it. See config.md, Seam 11.
+- `auto_reopen_profile_after_s: 180` — when the profile picker has been
+  showing for 180 s with no profile open, reopen the previous profile as if
+  Open were clicked, so the AnkiMCP server (which only runs while a profile
+  is open) comes back on its own. `0` disables. See config.md, Seam 12.
 
 ## Build
 

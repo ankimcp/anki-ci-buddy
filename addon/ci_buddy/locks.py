@@ -528,6 +528,84 @@ def sanitize_about_debug_info() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seam 11 (config-gated) — deck-browser bottom-bar buttons
+# --------------------------------------------------------------------------- #
+
+#: The original ``DeckBrowser.drawLinks`` list (so the removal is
+#: reversible/testable and idempotent). Populated by
+#: ``remove_deck_browser_buttons``; mirrors ``_original_write_config``.
+_original_deck_browser_draw_links: list[Any] | None = None
+
+
+def remove_deck_browser_buttons(config: dict[str, Any]) -> None:
+    """Remove the locked buttons (Get Shared / Import File) from the deck
+    browser's bottom bar (Seam 11). Create Deck stays.
+
+    MECHANISM (verified against aqt 26.5, 26.8.1, 26.9, 26.9.2, 26.9.3,
+    ``qt/aqt/deckbrowser.py``): the bar is built by ``DeckBrowser._drawButtons``
+    on every render from the CLASS attribute ``drawLinks`` — a list of
+    ``[shortcut, cmd, label]`` entries (``shared`` / ``create`` / ``import``)
+    read via ``self.drawLinks``. There is no gui_hook for it, so we replace
+    the class attribute with a filtered copy, matching on the ``pycmd``
+    command — never the label, which is translated.
+
+    Applied at add-on load time, not on a hook: the patch must be in place
+    before the first ``_drawButtons`` call, and a load-time patch has no
+    dependency on hook ordering. (``setupProfile`` → ``loadCollection`` →
+    ``moveToState("deckBrowser")`` only starts ``_renderPage``'s background
+    ``QueryOp``; ``_drawButtons`` runs in its success callback on a later
+    event-loop turn, normally after ``main_window_did_init`` — timing, not a
+    contract.) ``aqt.deckbrowser`` is already imported by then (``setupUI`` →
+    ``setupDeckBrowser`` runs before ``setupAddons``).
+
+    Only the buttons go: the ``shared``/``import`` commands in
+    ``DeckBrowser._linkHandler`` and File → Import / Ctrl+Shift+I are left
+    alone. The Import File button calls ``mw.onImport()`` — the same dialog
+    File → Import opens — so removing the menu and button entry points to it
+    needs both ``lock_import`` and ``lock_deck_browser_import``. Drag-and-drop
+    of a file onto the Decks screen (``MainWebView.dropEvent``) is covered by
+    neither.
+
+    Fail-open: a missing class or a ``drawLinks`` that is no longer a list is
+    a logged skip; a locked command no longer present is a logged warning.
+    Idempotent: a second run is a no-op.
+    """
+    global _original_deck_browser_draw_links
+
+    if _original_deck_browser_draw_links is not None:
+        return  # already applied
+
+    import aqt.deckbrowser
+
+    removed = {
+        cmd
+        for cmd, should_lock in core.deck_browser_button_lock_plan(config).items()
+        if should_lock
+    }
+    if not removed:
+        return
+
+    deck_browser_cls = getattr(aqt.deckbrowser, "DeckBrowser", None)
+    links = getattr(deck_browser_cls, "drawLinks", None)
+    if not isinstance(links, list):
+        print(
+            "[ci_buddy] warning: DeckBrowser.drawLinks not present or not a "
+            "list on this Anki version (deck-browser button lock skipped)"
+        )
+        return
+
+    present = {core.deck_browser_link_cmd(link) for link in links}
+    for cmd in sorted(removed - present):
+        print(
+            f"[ci_buddy] warning: deck-browser button {cmd!r} not present on "
+            "this Anki version (lock skipped)"
+        )
+
+    _original_deck_browser_draw_links = links
+    deck_browser_cls.drawLinks = core.filter_deck_browser_links(links, removed)
+
+
+# --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
 
@@ -595,6 +673,12 @@ def register(config: dict[str, Any]) -> None:
     # place before the first click.
     if config.get("sanitize_copy_debug_info", True):
         _safe(sanitize_about_debug_info)()
+
+    # Seam 11: remove Get Shared / Import File from the deck-browser bottom
+    # bar. Applied NOW (at add-on load), not on a hook: it must be in place
+    # before the first _drawButtons, with no dependency on hook ordering.
+    if any(core.deck_browser_button_lock_plan(config).values()):
+        _safe(remove_deck_browser_buttons)(config)
 
     # Seam 5: sync surfaces (config-gated; conservative defaults).
     if config.get("strip_sync_link", False):

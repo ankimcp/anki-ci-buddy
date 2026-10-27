@@ -89,9 +89,11 @@ def _reset_shim_ref():
     # Keep the module-level original-refs clean between tests.
     locks._original_write_config = None
     locks._original_about_debug_symbols.clear()
+    locks._original_deck_browser_draw_links = None
     yield
     locks._original_write_config = None
     locks._original_about_debug_symbols.clear()
+    locks._original_deck_browser_draw_links = None
 
 
 # --------------------------------------------------------------------------- #
@@ -801,6 +803,132 @@ def test_sanitize_about_debug_info_missing_aqt_about_fails_open(
 
 
 # --------------------------------------------------------------------------- #
+# Seam 11 — deck-browser bottom-bar buttons
+# --------------------------------------------------------------------------- #
+
+
+def _stock_draw_links():
+    """``DeckBrowser.drawLinks`` as shipped in aqt 26.5–26.9.3."""
+    return [
+        ["", "shared", "Get Shared"],
+        ["", "create", "Create Deck"],
+        ["Ctrl+Shift+I", "import", "Import File"],
+    ]
+
+
+def _make_fake_deckbrowser_module(draw_links=None, *, with_class=True):
+    """A fake ``aqt.deckbrowser``; ``drawLinks`` is a CLASS attribute, like
+    aqt's."""
+    deckbrowser_mod = types.ModuleType("aqt.deckbrowser")
+    if with_class:
+
+        class DeckBrowser:
+            drawLinks = _stock_draw_links() if draw_links is None else draw_links
+
+            def _drawButtons(self):
+                # Same read as aqt: the class attr, via self.
+                return [b[1] for b in self.drawLinks]
+
+        deckbrowser_mod.DeckBrowser = DeckBrowser
+    return deckbrowser_mod
+
+
+def _install_fake_aqt_deckbrowser(monkeypatch, draw_links=None, *, with_class=True):
+    """Install a fresh fake ``aqt`` + ``aqt.deckbrowser`` so
+    ``remove_deck_browser_buttons`` (which does ``import aqt.deckbrowser``)
+    resolves against them."""
+    deckbrowser_mod = _make_fake_deckbrowser_module(draw_links, with_class=with_class)
+    aqt_mod = types.ModuleType("aqt")
+    aqt_mod.deckbrowser = deckbrowser_mod
+    monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
+    monkeypatch.setitem(sys.modules, "aqt.deckbrowser", deckbrowser_mod)
+    return deckbrowser_mod
+
+
+def test_remove_deck_browser_buttons_keeps_only_create_deck(monkeypatch):
+    mod = _install_fake_aqt_deckbrowser(monkeypatch)
+    existing_instance = mod.DeckBrowser()  # mw.deckBrowser predates add-ons
+
+    locks.remove_deck_browser_buttons(core.merge_config({}))
+
+    assert existing_instance._drawButtons() == ["create"]
+    assert mod.DeckBrowser()._drawButtons() == ["create"]
+    # the original list is preserved, not mutated
+    assert [b[1] for b in locks._original_deck_browser_draw_links] == [
+        "shared",
+        "create",
+        "import",
+    ]
+
+
+def test_remove_deck_browser_buttons_gates_are_individual(monkeypatch):
+    mod = _install_fake_aqt_deckbrowser(monkeypatch)
+
+    locks.remove_deck_browser_buttons(
+        core.merge_config({"lock_deck_browser_import": False})
+    )
+
+    assert mod.DeckBrowser()._drawButtons() == ["create", "import"]
+
+
+def test_remove_deck_browser_buttons_all_gates_off_is_noop(monkeypatch):
+    mod = _install_fake_aqt_deckbrowser(monkeypatch)
+    before = mod.DeckBrowser.drawLinks
+
+    locks.remove_deck_browser_buttons(
+        core.merge_config(
+            {"lock_deck_browser_get_shared": False, "lock_deck_browser_import": False}
+        )
+    )
+
+    assert mod.DeckBrowser.drawLinks is before
+
+
+def test_remove_deck_browser_buttons_is_idempotent(monkeypatch, capsys):
+    mod = _install_fake_aqt_deckbrowser(monkeypatch)
+
+    locks.remove_deck_browser_buttons(core.merge_config({}))
+    filtered = mod.DeckBrowser.drawLinks
+    locks.remove_deck_browser_buttons(core.merge_config({}))
+
+    assert mod.DeckBrowser.drawLinks is filtered
+    assert "lock skipped" not in capsys.readouterr().out
+
+
+def test_remove_deck_browser_buttons_missing_command_warns(monkeypatch, capsys):
+    # A future aqt that dropped/renamed the Get Shared command: logged skip,
+    # the Import File removal still applies.
+    mod = _install_fake_aqt_deckbrowser(
+        monkeypatch,
+        [["", "create", "Create Deck"], ["Ctrl+Shift+I", "import", "Import File"]],
+    )
+
+    locks.remove_deck_browser_buttons(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "'shared'" in out
+    assert "lock skipped" in out
+    assert mod.DeckBrowser()._drawButtons() == ["create"]
+
+
+@pytest.mark.parametrize("with_class", [True, False])
+def test_remove_deck_browser_buttons_reshaped_warns_not_crash(
+    monkeypatch, capsys, with_class
+):
+    # No DeckBrowser class, or a drawLinks that is no longer a list.
+    _install_fake_aqt_deckbrowser(
+        monkeypatch, draw_links=("not", "a", "list"), with_class=with_class
+    )
+
+    locks.remove_deck_browser_buttons(core.merge_config({}))
+
+    out = capsys.readouterr().out
+    assert "DeckBrowser.drawLinks" in out
+    assert "lock skipped" in out
+    assert locks._original_deck_browser_draw_links is None
+
+
+# --------------------------------------------------------------------------- #
 # register — Seam 7 gating and load-time application
 # --------------------------------------------------------------------------- #
 
@@ -836,6 +964,8 @@ _REGISTER_BASE = {
     "lock_addon_config_writes": False,
     "lock_debug_console": False,
     "sanitize_copy_debug_info": False,
+    "lock_deck_browser_get_shared": False,
+    "lock_deck_browser_import": False,
 }
 
 
@@ -944,3 +1074,63 @@ def test_register_gate_off_leaves_about_debug_info_alone(monkeypatch):
     # Untouched original behaviour: the real debug text is still copied.
     assert _on_copy_text(about_mod) == _REAL_SUPPORT_TEXT + "\n" + _REAL_ADDON_INFO
     assert not getattr(about_mod.supportText, locks._CI_BUDDY_SHIM_ATTR, False)
+
+
+def _add_fake_deckbrowser_to_register_env(monkeypatch):
+    """Graft a fake ``aqt.deckbrowser`` onto the register-test fake ``aqt``."""
+    deckbrowser_mod = _make_fake_deckbrowser_module()
+    sys.modules["aqt"].deckbrowser = deckbrowser_mod
+    monkeypatch.setitem(sys.modules, "aqt.deckbrowser", deckbrowser_mod)
+    return deckbrowser_mod
+
+
+def test_register_removes_deck_browser_buttons_at_load_time(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    mod = _add_fake_deckbrowser_to_register_env(monkeypatch)
+
+    locks.register(
+        core.merge_config(
+            dict(
+                _REGISTER_BASE,
+                lock_deck_browser_get_shared=True,
+                lock_deck_browser_import=True,
+            )
+        )
+    )
+
+    # Applied immediately at register (add-on load) time — NOT deferred to a
+    # hook: it must be in place before the first _drawButtons, with no
+    # dependency on hook ordering.
+    assert mod.DeckBrowser()._drawButtons() == ["create"]
+
+
+def test_register_gates_off_leave_deck_browser_buttons_alone(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    mod = _add_fake_deckbrowser_to_register_env(monkeypatch)
+
+    locks.register(core.merge_config(_REGISTER_BASE))
+
+    assert mod.DeckBrowser()._drawButtons() == ["shared", "create", "import"]
+
+
+def test_register_deck_browser_import_failure_fails_open(monkeypatch, capsys):
+    # No aqt.deckbrowser module at all (radically reshaped aqt): the
+    # _safe-wrapped register path logs the failure and moves on — never a
+    # crash, and later registrations still happen.
+    hooks = _install_fake_aqt_for_register(monkeypatch, FakePM())
+    monkeypatch.delitem(sys.modules, "aqt.deckbrowser", raising=False)
+
+    locks.register(
+        core.merge_config(
+            dict(
+                _REGISTER_BASE,
+                lock_deck_browser_get_shared=True,
+                lock_deck_browser_import=True,
+                strip_sync_link=True,
+            )
+        )
+    )
+
+    assert "remove_deck_browser_buttons failed" in capsys.readouterr().out
+    assert locks._original_deck_browser_draw_links is None
+    assert len(hooks.top_toolbar_did_init_links.handlers) == 1

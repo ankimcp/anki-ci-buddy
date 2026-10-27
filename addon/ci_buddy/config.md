@@ -89,6 +89,29 @@ Anki that reshapes `profiles.ui` or `showProfileManager` — degrades to
 "buttons visible" with a logged `lock skipped` warning, never a startup
 failure.
 
+### Deck-browser bottom bar (Part A, Seam 11)
+
+The main Decks screen's bottom bar shows **Get Shared**, **Create Deck** and
+**Import File**:
+
+| Key | Default | Locks |
+|---|---|---|
+| `lock_deck_browser_get_shared` | `true` | Removes the **Get Shared** button (`pycmd` command `shared`). |
+| `lock_deck_browser_import` | `true` | Removes the **Import File** button (`pycmd` command `import`). The button calls `mw.onImport()` — the same import dialog File → Import (`lock_import`) opens. The two keys are separate, but **both must be `true`** to remove the menu and button entry points to that dialog. Neither key covers drag-and-drop of a file onto the Decks screen (`MainWebView.dropEvent`), which still imports. |
+
+**Create Deck** (`create`) is never touched. The buttons are always
+**removed**, whatever `hide_vs_disable` says (they are HTML buttons, not Qt
+widgets). Mechanism: aqt builds the bar on every render from the class
+attribute `aqt.deckbrowser.DeckBrowser.drawLinks` (`[shortcut, cmd, label]`
+entries); ci-buddy replaces it **at add-on load time** with a copy filtered by
+**command**, never by the translated label. The patch has to be in place before
+the first `_drawButtons` call; applying it at load time guarantees that without
+depending on hook ordering (the first deck-browser render is a background query
+whose callback normally runs after `main_window_did_init`, but that's an
+event-loop timing detail, not a contract). Fail-open: a missing/reshaped
+`drawLinks`, or a command that no longer exists, is a logged `lock skipped`
+warning, never a crash.
+
 ### Collection editing always stays usable
 
 Add, Browse, Study/Review, Decks, Stats, per-deck options, Undo/Redo, and Manage

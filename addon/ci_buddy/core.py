@@ -50,6 +50,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lock_profile_manager_open_backup": True,
     "lock_profile_manager_quit": True,
     "lock_profile_manager_downgrade": True,
+    "lock_deck_browser_get_shared": True,
+    "lock_deck_browser_import": True,
     "lock_debug_console": True,
     "sanitize_copy_debug_info": True,
     "disable_update_checks": True,
@@ -114,6 +116,17 @@ PROFILE_MANAGER_LOCK_MAP: dict[str, str] = {
     "lock_profile_manager_open_backup": "openBackup",
     "lock_profile_manager_quit": "quit",
     "lock_profile_manager_downgrade": "downgrade_button",
+}
+
+#: Maps a boolean config key to the deck-browser bottom-bar button it removes
+#: (Seam 11), keyed by the button's ``pycmd`` command — NOT its label, which is
+#: translated. ``aqt.deckbrowser.DeckBrowser.drawLinks`` is a list of
+#: ``[shortcut, cmd, label]`` entries: ``shared`` (Get Shared), ``create``
+#: (Create Deck), ``import`` (Import File) — verified against aqt 26.5–26.9.3.
+#: ``create`` is deliberately absent: Create Deck must stay usable (§A.4).
+DECK_BROWSER_BUTTON_LOCK_MAP: dict[str, str] = {
+    "lock_deck_browser_get_shared": "shared",
+    "lock_deck_browser_import": "import",
 }
 
 #: The ``mw.pm`` setters that ``disable_update_checks`` forces to ``False``:
@@ -245,6 +258,35 @@ def profile_manager_lock_plan(config: dict[str, Any]) -> dict[str, bool]:
         attr: bool(config.get(cfg_key, False))
         for cfg_key, attr in PROFILE_MANAGER_LOCK_MAP.items()
     }
+
+
+def deck_browser_button_lock_plan(config: dict[str, Any]) -> dict[str, bool]:
+    """Map deck-browser bottom-bar ``pycmd`` command → whether its button
+    should be removed (Seam 11). Mirrors ``action_lock_plan`` for
+    ``DECK_BROWSER_BUTTON_LOCK_MAP``.
+    """
+    return {
+        cmd: bool(config.get(cfg_key, False))
+        for cfg_key, cmd in DECK_BROWSER_BUTTON_LOCK_MAP.items()
+    }
+
+
+def deck_browser_link_cmd(link: Any) -> str | None:
+    """The ``pycmd`` command of one ``DeckBrowser.drawLinks`` entry
+    (``[shortcut, cmd, label]``), or ``None`` when the entry is not shaped
+    like that."""
+    if isinstance(link, (list, tuple)) and len(link) >= 2:
+        cmd = link[1]
+        if isinstance(cmd, str):
+            return cmd
+    return None
+
+
+def filter_deck_browser_links(links: list[Any], removed_cmds: set[str]) -> list[Any]:
+    """Return a NEW list of ``drawLinks`` entries without the ones whose
+    command is in ``removed_cmds``. Entries that are not ``[shortcut, cmd,
+    label]``-shaped are kept untouched (fail open)."""
+    return [link for link in links if deck_browser_link_cmd(link) not in removed_cmds]
 
 
 # --------------------------------------------------------------------------- #

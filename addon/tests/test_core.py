@@ -136,6 +136,42 @@ def test_profile_manager_lock_map_never_touches_profile_management_buttons():
         assert kept not in core.PROFILE_MANAGER_LOCK_MAP.values()
 
 
+def test_deck_browser_button_lock_plan_removes_shared_and_import_by_default():
+    # pycmd commands verified against aqt deckbrowser.py DeckBrowser.drawLinks.
+    assert core.deck_browser_button_lock_plan(core.DEFAULT_CONFIG) == {
+        "shared": True,
+        "import": True,
+    }
+
+
+def test_deck_browser_button_lock_plan_gates_are_individually_toggleable():
+    plan = core.deck_browser_button_lock_plan(
+        core.merge_config({"lock_deck_browser_import": False})
+    )
+    assert plan == {"shared": True, "import": False}
+
+
+def test_deck_browser_button_lock_map_never_touches_create_deck():
+    assert "create" not in core.DECK_BROWSER_BUTTON_LOCK_MAP.values()
+
+
+def test_filter_deck_browser_links_matches_command_not_label():
+    # Labels are translated (here: German) — only the command decides.
+    links = [
+        ["", "shared", "Gemeinsame herunterladen"],
+        ["", "create", "Stapel erstellen"],
+        ["Ctrl+Shift+I", "import", "Datei importieren"],
+    ]
+    kept = core.filter_deck_browser_links(links, {"shared", "import"})
+    assert kept == [["", "create", "Stapel erstellen"]]
+    assert len(links) == 3  # input list not mutated
+
+
+def test_filter_deck_browser_links_keeps_unshaped_entries():
+    links = ["not-a-link", ["only-one"], ["", 42, "x"], ["", "shared", "Get Shared"]]
+    assert core.filter_deck_browser_links(links, {"shared"}) == links[:3]
+
+
 def test_update_check_setters_pin_the_pm_contract():
     # The exact mw.pm setter names Seam 7 calls (aqt/profiles.py); a rename in
     # aqt must be caught here, not by a runtime warning alone.

@@ -55,6 +55,11 @@ Notable defaults (conservative — a non-hosted user is never surprised):
   greppable stderr warning (`CI_BUDDY_UNSUPPORTED_ANKI`) and show a red banner
   in the GUI. A **warning, not a gate**: Anki still starts and every seam still
   applies (fail-open as usual). See config.md, Seam 10.
+- `lock_deck_browser_get_shared` / `lock_deck_browser_import: true` — remove the
+  **Get Shared** and **Import File** buttons from the Decks screen's bottom bar
+  (Create Deck stays). The Import File button opens the same dialog as File →
+  Import, so **both** `lock_import` and `lock_deck_browser_import` are needed to
+  close every entry point to it. See config.md, Seam 11.
 
 ## Build
 

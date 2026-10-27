@@ -6,9 +6,10 @@ hosted / CI "Anki-as-a-Service" deployments. One add-on, two config-gated module
 - **`locks.py` — locks down the GUI.** A user can freely edit their collection (Add,
   Browse, Study, Decks, Stats, Note Types) and manage their own profiles (switch, add,
   rename, delete — since v0.7.0) but cannot tamper with the environment: no add-on
-  install/remove, no add-on config edits, no Preferences, no app upgrade/downgrade, and
-  the profile-manager screen's dangerous buttons (Open Backup / Quit / Downgrade) are
-  locked.
+  install/remove, no add-on config edits, no Preferences, no app upgrade/downgrade, the
+  profile-manager screen's dangerous buttons (Open Backup / Quit / Downgrade) are
+  locked, and the Decks screen's Get Shared / Import File buttons are removed (since
+  v0.9.0; Create Deck stays).
 - **`provisioners.py` — forces managed-environment config** the locked GUI can't
   reach: the collection's LaTeX-rendering flag, and hiding the sibling AnkiMCP
   add-on's UI surfaces.

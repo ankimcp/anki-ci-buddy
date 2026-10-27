@@ -24,7 +24,8 @@ brand strings in one constant.
 - **`locks.py`** — make Anki a locked appliance (no add-on install/remove/config, no
   Preferences, no app upgrade), while collection editing, Note Types, and self-service
   profile management (switch / add / rename / delete — v0.7.0, Seam 9 locks the
-  profile-manager's dangerous buttons) stay fully usable.
+  profile-manager's dangerous buttons) stay fully usable. The Decks screen's Get
+  Shared / Import File buttons are removed (v0.9.0, Seam 11); Create Deck stays.
 - **`provisioners.py`** — force managed-environment config the locked GUI can't reach:
   the collection's `RENDER_LATEX` flag, and the sibling AnkiMCP add-on's UI-surface
   config keys. `provisioners.py` MUST NOT import `locks.py` (keep the two concerns
@@ -130,6 +131,21 @@ persistent toolbar badge. Anki still starts and all seams still apply. Operator 
 verify the seams on the new Anki, add its version string to the matrix, release a new
 ci-buddy. Gated by `warn_unsupported_anki` (§4).
 
+### Seam 11 (config-gated, v0.9.0): deck-browser bottom-bar buttons
+Remove **Get Shared** and **Import File** from the main Decks screen's bottom bar;
+**Create Deck** stays. aqt builds that bar from the class attribute
+`aqt.deckbrowser.DeckBrowser.drawLinks` (`[shortcut, cmd, label]` entries, commands
+`shared` / `create` / `import`; verified against aqt 26.5–26.9.3) and exposes no hook
+for it, so ci-buddy replaces it at add-on load time with a copy filtered by **command**
+(labels are translated). Load time, not a hook: the patch must be in place before the
+first `_drawButtons` call, and a load-time patch has no dependency on hook ordering.
+Gated by `lock_deck_browser_get_shared` / `lock_deck_browser_import` (§4). The Import
+File button calls `mw.onImport()`, the same dialog File → Import opens; the File-menu
+item stays under its own key (`lock_import`), so **both** `lock_import` and
+`lock_deck_browser_import` are needed to remove the menu and button entry points to that
+dialog. Drag-and-drop of a file onto the Decks screen (`MainWebView.dropEvent`) is not
+covered by either key.
+
 ### Borderline actions — config-gated (default = locked)
 Destructive (can replace/destroy the whole collection): `actionImport` (File → Import),
 `action_open_backup` (File → Open Backup) → default **LOCK**. Low-risk maintenance:
@@ -203,6 +219,8 @@ platform decision 14):
   "lock_profile_manager_open_backup": true,
   "lock_profile_manager_quit": true,
   "lock_profile_manager_downgrade": true,
+  "lock_deck_browser_get_shared": true,
+  "lock_deck_browser_import": true,
   "strip_sync_link": false,
   "disable_native_auto_sync": false,
   "warn_unsupported_anki": true
@@ -284,6 +302,8 @@ headless-anki over VNC**, asserting:
    **enabled** windows (catches an over-broad dialog filter).
 4. `mw.addonManager.writeConfig("some.module", {...})` then re-read → unchanged.
 5. Note Types stays enabled.
+5b. `[l[1] for l in aqt.deckbrowser.DeckBrowser.drawLinks] == ["create"]` with the
+   default config (Seam 11), and the Create Deck button still creates a deck.
 
 **Config provisioners** (unit-testable with fake `col` / `addonManager` objects — no
 real Anki needed):
@@ -301,6 +321,8 @@ coverage you don't have.
       profile-manager screen's dangerous buttons locked; `writeConfig` neutered.
 - [ ] Add / Browse / Study / Decks / Stats / Note Types still open and work.
 - [ ] Programmatic `dialogs.open("Preferences"|"AddonsDialog")` disabled; other dialogs unaffected.
+- [ ] Decks screen bottom bar shows only Create Deck (no Get Shared / Import File), and
+      Create Deck still works.
 - [ ] ci-buddy never reads/writes/clears any sync credential (Part B): a manual AnkiWeb
       login over VNC survives profile close and pod restart (persisted on the PVC).
 - [ ] ci-buddy never triggers sync itself; no k8s creds in the add-on.

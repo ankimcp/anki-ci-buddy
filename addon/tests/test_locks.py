@@ -1298,7 +1298,7 @@ def test_register_wires_auto_reopen_with_default_delay(monkeypatch):
 
     assert len(hooks.state_did_change.handlers) == 1
     hooks.state_did_change.handlers[0]("profileManager", "startup")
-    assert locks._auto_reopen_timer.started_with == [180_000]
+    assert locks._auto_reopen_timer.started_with == [60_000]
 
 
 def test_register_zero_delay_leaves_auto_reopen_off(monkeypatch):

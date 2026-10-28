@@ -488,8 +488,9 @@ def test_banner_html_escapes_version_strings():
 # --------------------------------------------------------------------------- #
 
 
-def test_auto_reopen_delay_default_is_180s():
-    assert core.auto_reopen_profile_delay_ms(core.DEFAULT_CONFIG) == 180_000
+def test_auto_reopen_delay_default_is_60s():
+    # Must stay shorter than the hosted operator's readiness window (90 s).
+    assert core.auto_reopen_profile_delay_ms(core.DEFAULT_CONFIG) == 60_000
 
 
 @pytest.mark.parametrize("value", [0, -5, True, False, "180", None, [180]])

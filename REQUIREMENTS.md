@@ -158,7 +158,12 @@ no Switch Profile lockout, no liveness probe. Mechanism: `gui_hooks.state_did_ch
 to `deckBrowser`) arms / stops one single-shot `QTimer`; on fire, `mw.onOpenProfile()`
 (verified identical across aqt 26.5–26.9.3). A visible modal re-arms instead of
 interrupting; a failed open shows the picker again, which re-arms (retry bounded by N).
-Gated by `auto_reopen_profile_after_s` (§4; default 180, `0` disables).
+Gated by `auto_reopen_profile_after_s` (§4; default 60 since v0.10.1, `0` disables).
+Coupled to the hosted operator's readiness probe: the MCP port is down from profile
+close until the reopen finishes, so the operator's readiness window (period ×
+failureThreshold; 90 s as of v0.10.1) must stay longer than this delay plus
+profile-load time, or the pod flips NotReady mid-switch and the dashboard hides the
+VNC viewer. Raise both together.
 
 ### Borderline actions — config-gated (default = locked)
 Destructive (can replace/destroy the whole collection): `actionImport` (File → Import),
@@ -235,7 +240,7 @@ platform decision 14):
   "lock_profile_manager_downgrade": true,
   "lock_deck_browser_get_shared": true,
   "lock_deck_browser_import": true,
-  "auto_reopen_profile_after_s": 180,
+  "auto_reopen_profile_after_s": 60,
   "strip_sync_link": false,
   "disable_native_auto_sync": false,
   "warn_unsupported_anki": true
@@ -336,7 +341,7 @@ coverage you don't have.
       profile-manager screen's dangerous buttons locked; `writeConfig` neutered.
 - [ ] Add / Browse / Study / Decks / Stats / Note Types still open and work.
 - [ ] Programmatic `dialogs.open("Preferences"|"AddonsDialog")` disabled; other dialogs unaffected.
-- [ ] File → Switch Profile, leave the picker idle: after 180 s the previous profile
+- [ ] File → Switch Profile, leave the picker idle: after 60 s the previous profile
       reopens on its own and the AnkiMCP port is listening again; an Add/Rename prompt
       left open is not interrupted.
 - [ ] Decks screen bottom bar shows only Create Deck (no Get Shared / Import File), and

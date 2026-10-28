@@ -116,7 +116,7 @@ warning, never a crash.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auto_reopen_profile_after_s` | `180` | When the profile picker (the screen File → Switch Profile opens) has been showing for this many seconds with no profile open, ci-buddy reopens the selected profile — the one that was open before, unless the user moved the selection — exactly as if the user had clicked **Open**. `0` (or any non-positive / non-numeric value) disables it. |
+| `auto_reopen_profile_after_s` | `60` | When the profile picker (the screen File → Switch Profile opens) has been showing for this many seconds with no profile open, ci-buddy reopens the selected profile — the one that was open before, unless the user moved the selection — exactly as if the user had clicked **Open**. `0` (or any non-positive / non-numeric value) disables it. **Coupled to the hosted operator's readiness probe:** the MCP port is down from profile close until the reopen finishes, so the operator's readiness window (probe period × failureThreshold; 90 s as of v0.10.1) must stay longer than this delay plus profile-load time, or the pod flips NotReady mid-switch and the dashboard hides the VNC viewer. Raise both together. |
 
 Why: on the hosted appliance, closing a profile stops the AnkiMCP add-on's
 HTTP server (it only runs while a profile is open), and nothing restarts it

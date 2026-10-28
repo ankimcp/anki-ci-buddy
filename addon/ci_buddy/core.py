@@ -53,8 +53,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lock_deck_browser_get_shared": True,
     "lock_deck_browser_import": True,
     # Seam 12 (v0.10.0): reopen the last profile when the profile picker has
-    # been showing this long with no profile open; 0 disables.
-    "auto_reopen_profile_after_s": 180,
+    # been showing this long with no profile open; 0 disables. COUPLED to the
+    # hosted operator's readiness probe: the MCP port is down from profile
+    # close until the reopen finishes, so the operator's readiness window
+    # (period × failureThreshold, 90 s as of v0.10.1) must stay longer than
+    # this delay plus profile-load time, or the pod flips NotReady mid-switch.
+    "auto_reopen_profile_after_s": 60,
     "lock_debug_console": True,
     "sanitize_copy_debug_info": True,
     "disable_update_checks": True,

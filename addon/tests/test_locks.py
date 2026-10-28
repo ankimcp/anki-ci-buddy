@@ -967,6 +967,7 @@ _REGISTER_BASE = {
     "sanitize_copy_debug_info": False,
     "lock_deck_browser_get_shared": False,
     "lock_deck_browser_import": False,
+    "auto_reopen_profile_after_s": 0,
 }
 
 
@@ -1155,16 +1156,15 @@ class _FakeSignal:
 
 
 class _FakeTimer:
-    """QTimer stand-in: records start/stop and lets tests fire ``timeout``."""
+    """QTimer stand-in: records start/stop, lets tests fire ``timeout``, and
+    runs ``singleShot(0, fn)`` callbacks synchronously (recorded too)."""
+
+    deferred: list = []
 
     def __init__(self):
-        self.single_shot = False
         self.started_with: list[int] = []
         self.stopped = 0
         self.timeout = _FakeSignal()
-
-    def setSingleShot(self, value):
-        self.single_shot = value
 
     def start(self, ms):
         self.started_with.append(ms)
@@ -1175,137 +1175,304 @@ class _FakeTimer:
     def fire(self):
         self.timeout.emit()
 
+    @classmethod
+    def singleShot(cls, _ms, fn):
+        cls.deferred.append(fn)
+        fn()
 
-def _install_fake_aqt_for_auto_reopen(monkeypatch, *, modal=None):
-    """Fake ``aqt`` + ``aqt.qt`` with the surface Seam 12 touches: ``mw.state``,
-    ``mw.onOpenProfile``, ``QTimer`` and ``QApplication.activeModalWidget``."""
+
+class _FakeProgressBar:
+    def __init__(self):
+        self.range = None
+        self.value = None
+        self.fmt = None
+        self.text_visible = None
+
+    def setRange(self, lo, hi):
+        self.range = (lo, hi)
+
+    def setValue(self, v):
+        self.value = v
+
+    def setFormat(self, fmt):
+        self.fmt = fmt
+
+    def setTextVisible(self, v):
+        self.text_visible = v
+
+
+class _FakeLayout:
+    def __init__(self):
+        self.widgets = []
+
+    def addWidget(self, w):
+        self.widgets.append(w)
+
+
+class _FakeModal:
+    def __init__(self):
+        self.rejected = 0
+
+    def reject(self):
+        self.rejected += 1
+
+
+class _CountdownMw(FakeProfileMw):
+    """``FakeProfileMw`` plus the surface Seam 12 touches: ``state``,
+    ``onOpenProfile`` and a picker form with the outer layout."""
+
+    def __init__(self):
+        super().__init__()
+        self.state = "profileManager"
+        self.opens = 0
+
+    def showProfileManager(self):
+        super().showProfileManager()
+        self.profileForm.verticalLayout_3 = _FakeLayout()
+
+    def onOpenProfile(self):
+        self.opens += 1
+        self.state = "deckBrowser"
+
+
+def _install_fake_aqt_for_countdown(monkeypatch, *, modal=None):
     monkeypatch.setattr(locks, "_auto_reopen_timer", None)
-    opens: list[str] = []
-    mw = types.SimpleNamespace(state="profileManager")
-    mw.onOpenProfile = lambda: opens.append(mw.state)
+    monkeypatch.setattr(locks, "_auto_reopen_bar", None)
+    monkeypatch.setattr(_FakeTimer, "deferred", [])
+    mw = _CountdownMw()
     aqt_mod = types.ModuleType("aqt")
     aqt_mod.mw = mw
     qt_mod = types.ModuleType("aqt.qt")
     qt_mod.QTimer = _FakeTimer
+    qt_mod.QProgressBar = _FakeProgressBar
     qt_mod.QApplication = types.SimpleNamespace(activeModalWidget=lambda: modal)
     aqt_mod.qt = qt_mod
     monkeypatch.setitem(sys.modules, "aqt", aqt_mod)
     monkeypatch.setitem(sys.modules, "aqt.qt", qt_mod)
-    return mw, opens
+    return mw
 
 
-def test_auto_reopen_arms_single_shot_timer_on_profile_manager_state(monkeypatch):
-    _install_fake_aqt_for_auto_reopen(monkeypatch)
+def _tick(n):
+    for _ in range(n):
+        locks._auto_reopen_timer.fire()
 
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
 
+def test_countdown_starts_full_bar_and_one_second_tick_on_showing(monkeypatch):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_picker_countdown(60)
+
+    mw.showProfileManager()
+
+    bar = locks._auto_reopen_bar
+    assert mw.profileForm.verticalLayout_3.widgets == [bar]
+    assert bar.range == (0, 60)
+    assert bar.value == 60
+    assert bar.text_visible is True
+    assert bar.fmt == locks.COUNTDOWN_BAR_FORMAT
+    assert locks._auto_reopen_timer.started_with == [1000]
+
+
+def test_countdown_drains_bar_and_reopens_at_zero(monkeypatch, capsys):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_picker_countdown(3)
+    mw.showProfileManager()
+    bar = locks._auto_reopen_bar
     timer = locks._auto_reopen_timer
-    assert timer.single_shot is True
-    assert timer.started_with == [180_000]
+
+    _tick(2)
+    assert bar.value == 1
+    assert mw.opens == 0
+
+    _tick(1)
+    assert bar.value == 0
+    assert mw.opens == 1
+    assert timer.stopped == 1
+    assert locks._auto_reopen_timer is None
+    assert "countdown elapsed" in capsys.readouterr().out
 
 
-def test_auto_reopen_stops_timer_when_leaving_profile_manager(monkeypatch):
-    _install_fake_aqt_for_auto_reopen(monkeypatch)
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+def test_countdown_nothing_resets_it_a_modal_is_rejected_at_zero(monkeypatch):
+    # Hard deadline: an open Add/Rename/Delete prompt does NOT buy time — at
+    # zero it is rejected (never accepted) and the profile reopened anyway.
+    modal = _FakeModal()
+    mw = _install_fake_aqt_for_countdown(monkeypatch, modal=modal)
+    locks.install_profile_picker_countdown(2)
+    mw.showProfileManager()
     timer = locks._auto_reopen_timer
 
-    locks.on_state_did_change("deckBrowser", "profileManager", 180_000)
+    _tick(2)
+
+    assert modal.rejected == 1
+    assert mw.opens == 1
+    assert timer.started_with == [1000]  # started once, never re-armed
+
+
+def test_countdown_reopen_is_deferred_one_event_loop_turn(monkeypatch):
+    # The modal's nested exec() must unwind before loadProfile runs, so the
+    # reopen goes through QTimer.singleShot(0, ...) rather than a direct call.
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_picker_countdown(1)
+    mw.showProfileManager()
+
+    _tick(1)
+
+    assert len(_FakeTimer.deferred) == 1
+    assert mw.opens == 1
+
+
+def test_countdown_stops_itself_once_user_opened_a_profile(monkeypatch):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_picker_countdown(60)
+    mw.showProfileManager()
+    timer = locks._auto_reopen_timer
+    mw.state = "deckBrowser"  # user clicked Open themselves
+
+    _tick(1)
 
     assert timer.stopped == 1
-    # Only one timer ever exists: a second picker showing restarts it.
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
-    assert locks._auto_reopen_timer is timer
-    assert timer.started_with == [180_000, 180_000]
-
-
-def test_auto_reopen_leaving_before_any_picker_is_noop(monkeypatch):
-    _install_fake_aqt_for_auto_reopen(monkeypatch)
-
-    locks.on_state_did_change("deckBrowser", "startup", 180_000)
-
     assert locks._auto_reopen_timer is None
+    assert mw.opens == 0
 
 
-def test_auto_reopen_fires_open_profile_while_picker_idle(monkeypatch, capsys):
-    mw, opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+def test_countdown_restarts_from_full_on_every_showing(monkeypatch):
+    # A second showing (Switch Profile again, or a failed load) builds a new
+    # form: the old tick timer is stopped and a fresh full bar installed.
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_picker_countdown(60)
+    mw.showProfileManager()
+    first_timer = locks._auto_reopen_timer
+    _tick(10)
+    assert locks._auto_reopen_bar.value == 50
 
-    locks._auto_reopen_timer.fire()
+    mw.showProfileManager()
 
-    assert opens == ["profileManager"]
-    assert "reopening the last profile" in capsys.readouterr().out
-
-
-def test_auto_reopen_does_nothing_once_anki_left_the_picker(monkeypatch):
-    # Timer fired late (state already moved on without the hook stopping it):
-    # never call onOpenProfile outside the picker.
-    mw, opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
-    mw.state = "deckBrowser"
-
-    locks._auto_reopen_timer.fire()
-
-    assert opens == []
+    assert first_timer.stopped == 1
+    assert locks._auto_reopen_timer is not first_timer
+    assert locks._auto_reopen_bar.value == 60
+    assert locks._auto_reopen_bar in mw.profileForm.verticalLayout_3.widgets
 
 
-def test_auto_reopen_rearms_instead_of_interrupting_a_modal(monkeypatch):
-    # The user is mid Add/Rename/Delete prompt: wait another full delay.
-    mw, opens = _install_fake_aqt_for_auto_reopen(monkeypatch, modal=object())
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
-    timer = locks._auto_reopen_timer
+def test_countdown_missing_layout_runs_without_bar(monkeypatch, capsys):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_picker_countdown(2)
+    original_show = mw.showProfileManager
 
-    timer.fire()
+    def show_without_layout():
+        original_show()
+        del mw.profileForm.verticalLayout_3
 
-    assert opens == []
-    assert timer.started_with == [180_000, 180_000]
+    # Re-wrap on top of the stripped form builder.
+    mw.showProfileManager = show_without_layout
+    locks.install_profile_picker_countdown(2)
+    mw.showProfileManager()
+
+    assert "countdown bar skipped" in capsys.readouterr().out
+    assert locks._auto_reopen_bar is None
+    _tick(2)
+    assert mw.opens == 1  # the deadline still fires
 
 
-def test_auto_reopen_missing_on_open_profile_warns_not_crashes(
-    monkeypatch, capsys
-):
-    mw, _opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
-    del mw.onOpenProfile
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
-
-    locks._auto_reopen_timer.fire()
+def test_countdown_missing_on_open_profile_warns_not_crashes(monkeypatch, capsys):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    del _CountdownMw.onOpenProfile
+    try:
+        locks.install_profile_picker_countdown(1)
+        mw.showProfileManager()
+        _tick(1)
+    finally:
+        _CountdownMw.onOpenProfile = lambda self: None
 
     assert "profile auto-reopen skipped" in capsys.readouterr().out
 
 
-def test_auto_reopen_open_profile_failure_is_contained(monkeypatch, capsys):
-    # onOpenProfile raising must not propagate out of the Qt timer slot.
-    mw, _opens = _install_fake_aqt_for_auto_reopen(monkeypatch)
+def test_countdown_open_profile_failure_is_contained(monkeypatch, capsys):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
 
     def boom():
         raise RuntimeError("load failed")
 
     mw.onOpenProfile = boom
-    locks.on_state_did_change("profileManager", "deckBrowser", 180_000)
+    locks.install_profile_picker_countdown(1)
+    mw.showProfileManager()
 
-    locks._auto_reopen_timer.fire()
+    _tick(1)
 
-    assert "_profile_picker_idle failed" in capsys.readouterr().out
+    assert "boom failed" in capsys.readouterr().out
 
 
-def test_register_wires_auto_reopen_with_default_delay(monkeypatch):
-    hooks = _install_fake_aqt_for_register(monkeypatch, FakePM())
+def test_countdown_wrap_is_idempotent_and_keeps_seam9_marker(monkeypatch):
+    mw = _install_fake_aqt_for_countdown(monkeypatch)
+    locks.install_profile_manager_lock(core.merge_config({}))
+    seam9_wrap = mw.showProfileManager
+
+    locks.install_profile_picker_countdown(60)
+    wrapped = mw.showProfileManager
+    locks.install_profile_picker_countdown(60)
+
+    assert mw.showProfileManager is wrapped
+    assert wrapped is not seam9_wrap
+    # Seam 9's own idempotency guard still recognises the stacked wrap.
+    locks.install_profile_manager_lock(core.merge_config({}))
+    assert mw.showProfileManager is wrapped
+    mw.showProfileManager()
+    assert mw.show_calls == 1
+    assert mw.profileForm.quit.visible is False  # Seam 9 still applied
+
+
+def test_countdown_missing_show_profile_manager_warns_not_crash(
+    monkeypatch, capsys
+):
+    install_fake_aqt(monkeypatch, types.SimpleNamespace())
+
+    locks.install_profile_picker_countdown(60)
+
+    assert "profile auto-reopen skipped" in capsys.readouterr().out
+
+
+def test_register_installs_countdown_with_default_delay(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
     monkeypatch.setattr(locks, "_auto_reopen_timer", None)
+    monkeypatch.setattr(locks, "_auto_reopen_bar", None)
     qt_mod = types.ModuleType("aqt.qt")
     qt_mod.QTimer = _FakeTimer
+    qt_mod.QProgressBar = _FakeProgressBar
     monkeypatch.setitem(sys.modules, "aqt.qt", qt_mod)
+    mw = sys.modules["aqt"].mw
+    mw.state = "profileManager"
 
-    locks.register(core.merge_config(_REGISTER_BASE))
+    def fake_show():
+        mw.profileForm = types.SimpleNamespace(verticalLayout_3=_FakeLayout())
 
-    assert len(hooks.state_did_change.handlers) == 1
-    hooks.state_did_change.handlers[0]("profileManager", "startup")
-    assert locks._auto_reopen_timer.started_with == [60_000]
-
-
-def test_register_zero_delay_leaves_auto_reopen_off(monkeypatch):
-    hooks = _install_fake_aqt_for_register(monkeypatch, FakePM())
+    mw.showProfileManager = fake_show
 
     locks.register(
-        core.merge_config(dict(_REGISTER_BASE, auto_reopen_profile_after_s=0))
+        core.merge_config(dict(_REGISTER_BASE, auto_reopen_profile_after_s=60))
     )
 
-    assert hooks.state_did_change.handlers == []
+    assert mw.showProfileManager is not fake_show
+    mw.showProfileManager()
+    assert locks._auto_reopen_bar.range == (0, 60)
+    assert locks._auto_reopen_timer.started_with == [1000]
+
+
+def test_register_zero_delay_leaves_countdown_off(monkeypatch):
+    _install_fake_aqt_for_register(monkeypatch, FakePM())
+    mw = sys.modules["aqt"].mw
+
+    def fake_show():
+        pass
+
+    mw.showProfileManager = fake_show
+
+    locks.register(
+        core.merge_config(
+            dict(
+                _REGISTER_BASE,
+                lock_profile_manager_open_backup=False,
+                lock_profile_manager_quit=False,
+                lock_profile_manager_downgrade=False,
+            )
+        )
+    )
+
+    assert mw.showProfileManager is fake_show

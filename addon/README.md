@@ -60,10 +60,12 @@ Notable defaults (conservative — a non-hosted user is never surprised):
   (Create Deck stays). The Import File button opens the same dialog as File →
   Import, so **both** `lock_import` and `lock_deck_browser_import` are needed to
   close every entry point to it. See config.md, Seam 11.
-- `auto_reopen_profile_after_s: 60` — when the profile picker has been
-  showing for 60 s with no profile open, reopen the previous profile as if
-  Open were clicked, so the AnkiMCP server (which only runs while a profile
-  is open) comes back on its own. `0` disables. See config.md, Seam 12.
+- `auto_reopen_profile_after_s: 60` — hard deadline for the profile picker:
+  a progress bar in the picker drains over 60 s, then any open prompt is
+  cancelled and the previous profile reopened as if Open were clicked, so
+  the AnkiMCP server (which only runs while a profile is open) comes back
+  on its own. Coupled to the hosted operator's readiness window (90 s). `0`
+  disables. See config.md, Seam 12.
 
 ## Build
 

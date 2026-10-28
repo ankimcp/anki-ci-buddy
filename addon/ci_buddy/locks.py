@@ -609,15 +609,24 @@ def remove_deck_browser_buttons(config: dict[str, Any]) -> None:
 # Seam 12 (config-gated) — profile-picker auto-reopen
 # --------------------------------------------------------------------------- #
 
-#: The single-shot QTimer that reopens the last profile. Module-level so the
-#: handlers share one timer and a re-registration never leaves a second one
-#: running. Populated lazily on the first ``profileManager`` state.
+#: The 1 s tick QTimer driving the countdown, the QProgressBar it updates in
+#: the CURRENT picker, and the seconds left. Module-level so there is exactly
+#: one countdown at a time: every new showing stops the previous one first.
 _auto_reopen_timer: Any = None
+_auto_reopen_bar: Any = None
+_auto_reopen_remaining_s: int = 0
+
+#: Marker on the Seam 12 wrap of ``mw.showProfileManager`` (distinct from
+#: Seam 9's so each wrap is idempotent on its own).
+_CI_BUDDY_COUNTDOWN_SHIM_ATTR = "_ci_buddy_countdown_shim"
+
+#: ``QProgressBar.setFormat`` template; ``%v`` is the current value (seconds).
+COUNTDOWN_BAR_FORMAT = "Reopening previous profile in %v s"
 
 
-def _profile_picker_idle(delay_ms: int) -> None:
-    """Timer callback (Seam 12): the picker has been showing for ``delay_ms``
-    with no profile open — reopen the last profile via ``mw.onOpenProfile``.
+def _reopen_profile_now() -> None:
+    """Hard deadline reached (Seam 12): close any open modal, then reopen the
+    selected profile via ``mw.onOpenProfile``.
 
     ``onOpenProfile`` hides the picker and runs ``loadProfile`` on whatever
     ``pm`` currently holds (verified against aqt 26.5–26.9.3, ``qt/aqt/main.py``):
@@ -627,20 +636,16 @@ def _profile_picker_idle(delay_ms: int) -> None:
     successful load fires ``profile_did_open``, which is what restarts the
     AnkiMCP add-on's HTTP server (anki-mcp-saas#73).
 
-    Guards: nothing happens if Anki has already left the picker state. If a
-    modal is up (the Add/Rename prompt, a confirmation), the user is mid-task:
-    re-arm for another full delay rather than yank the picker from under
-    them. If the load fails, aqt shows the picker again, which re-arms via
-    ``state_did_change`` — so the retry cadence is bounded by ``delay_ms``.
+    A modal (Add/Rename prompt, delete confirmation, a warning box) is
+    REJECTED, never accepted: a cancelled ``getOnlyText`` returns ``""`` and a
+    cancelled ``askUser`` returns ``False``, and ``onAddProfile`` /
+    ``onRenameProfile`` / ``onRemProfile`` all return early on that, touching
+    nothing. The reopen itself is deferred one event-loop turn so the modal's
+    nested ``exec()`` unwinds before ``loadProfile`` runs.
     """
     from aqt import mw  # lazy — keeps this module import-safe for tests
-    from aqt.qt import QApplication
+    from aqt.qt import QApplication, QTimer
 
-    if getattr(mw, "state", None) != core.PROFILE_MANAGER_STATE:
-        return
-    if QApplication.activeModalWidget() is not None:
-        _auto_reopen_timer.start(delay_ms)
-        return
     open_profile = getattr(mw, "onOpenProfile", None)
     if not callable(open_profile):
         print(
@@ -648,39 +653,130 @@ def _profile_picker_idle(delay_ms: int) -> None:
             "version (profile auto-reopen skipped)"
         )
         return
-    print(
-        f"[ci_buddy] profile picker idle for {delay_ms // 1000}s — reopening "
-        "the last profile"
-    )
-    open_profile()
+
+    modal = QApplication.activeModalWidget()
+    if modal is not None:
+        dismiss = getattr(modal, "reject", None) or getattr(modal, "close", None)
+        if callable(dismiss):
+            dismiss()
+
+    print("[ci_buddy] profile picker countdown elapsed — reopening the last profile")
+    QTimer.singleShot(0, _safe(open_profile))
 
 
-def on_state_did_change(new_state: str, _old_state: str, delay_ms: int) -> None:
-    """Arm the auto-reopen timer when Anki enters the profile picker, stop it
-    when Anki leaves (Seam 12).
+def _countdown_tick() -> None:
+    """One-second tick (Seam 12): drain the bar; at zero, reopen. Stops itself
+    as soon as Anki has left the picker state (profile opened by the user,
+    or by us), so nothing fires outside the picker."""
+    global _auto_reopen_remaining_s
 
-    Every path to the picker — startup with no auto-loaded profile, File →
-    Switch Profile, and the collection-load-failure fallback — goes through
-    ``showProfileManager`` → ``moveToState("profileManager")``, which fires
-    ``state_did_change``; a successful profile open moves to ``deckBrowser``
-    and fires it again. One hook therefore covers arm and disarm.
-    """
-    global _auto_reopen_timer
+    from aqt import mw  # lazy — keeps this module import-safe for tests
 
-    if new_state != core.PROFILE_MANAGER_STATE:
-        if _auto_reopen_timer is not None:
-            _auto_reopen_timer.stop()
+    if getattr(mw, "state", None) != core.PROFILE_MANAGER_STATE:
+        stop_profile_picker_countdown()
         return
 
-    if _auto_reopen_timer is None:
-        from aqt.qt import QTimer
+    _auto_reopen_remaining_s -= 1
+    if _auto_reopen_bar is not None:
+        _auto_reopen_bar.setValue(max(_auto_reopen_remaining_s, 0))
+    if _auto_reopen_remaining_s <= 0:
+        stop_profile_picker_countdown()
+        _reopen_profile_now()
 
-        timer = QTimer()
-        timer.setSingleShot(True)
-        on_idle = _safe(_profile_picker_idle)
-        timer.timeout.connect(lambda: on_idle(delay_ms))
-        _auto_reopen_timer = timer
-    _auto_reopen_timer.start(delay_ms)
+
+def _install_countdown_bar(delay_s: int) -> Any:
+    """Append a full QProgressBar to the picker's outer layout
+    (``profileForm.verticalLayout_3``, the vertical box holding the
+    list+buttons row — identical in aqt 26.5–26.9.3 ``forms/profiles.ui``).
+    Returns the bar, or ``None`` (logged) when the layout is not there — the
+    countdown then runs without a visible bar, never a crash."""
+    from aqt import mw  # lazy — keeps this module import-safe for tests
+
+    form = getattr(mw, "profileForm", None)
+    layout = getattr(form, "verticalLayout_3", None)
+    if not callable(getattr(layout, "addWidget", None)):
+        print(
+            "[ci_buddy] warning: profile-manager layout not present on this "
+            "Anki version (countdown bar skipped; auto-reopen still armed)"
+        )
+        return None
+
+    from aqt.qt import QProgressBar
+
+    bar = QProgressBar()
+    bar.setRange(0, delay_s)
+    bar.setValue(delay_s)
+    bar.setTextVisible(True)
+    bar.setFormat(COUNTDOWN_BAR_FORMAT)
+    layout.addWidget(bar)
+    return bar
+
+
+def stop_profile_picker_countdown() -> None:
+    """Stop the tick timer and forget the bar (the bar itself dies with the
+    picker window; we only drop our reference)."""
+    global _auto_reopen_timer, _auto_reopen_bar
+
+    if _auto_reopen_timer is not None:
+        _auto_reopen_timer.stop()
+    _auto_reopen_timer = None
+    _auto_reopen_bar = None
+
+
+def start_profile_picker_countdown(delay_s: int) -> None:
+    """Start the hard-deadline countdown for the picker that was JUST built
+    (Seam 12): a full bar that drains over ``delay_s`` seconds; nothing resets
+    it; at zero any modal is closed and the profile reopened. Any previous
+    countdown is stopped first, so a re-shown picker restarts from full."""
+    global _auto_reopen_timer, _auto_reopen_bar, _auto_reopen_remaining_s
+
+    from aqt.qt import QTimer
+
+    stop_profile_picker_countdown()
+    _auto_reopen_remaining_s = delay_s
+    _auto_reopen_bar = _safe(_install_countdown_bar)(delay_s)
+
+    timer = QTimer()
+    timer.timeout.connect(_safe(_countdown_tick))
+    _auto_reopen_timer = timer
+    timer.start(1000)
+
+
+def install_profile_picker_countdown(delay_s: int) -> None:
+    """Wrap ``mw.showProfileManager`` so every showing of the picker starts a
+    fresh countdown (Seam 12).
+
+    Same TIMING reasoning as ``install_profile_manager_lock`` (Seam 9): the
+    picker is rebuilt from scratch on every ``showProfileManager`` call, the
+    first call can happen at startup before ``main_window_did_init``, and
+    every path (startup, File → Switch Profile, collection-load failure)
+    resolves ``mw.showProfileManager`` at call time. The countdown cannot be
+    started from ``state_did_change`` because aqt moves state BEFORE building
+    the form the bar is added to. Stacks cleanly on top of the Seam 9 wrap
+    (Seam 9's marker is carried through so its own idempotency guard still
+    sees it). Fail-open: a missing ``showProfileManager`` is a logged skip.
+    """
+    from aqt import mw  # lazy — keeps this module import-safe for tests
+
+    original = getattr(mw, "showProfileManager", None)
+    if not callable(original):
+        print(
+            "[ci_buddy] warning: mw.showProfileManager not present or not "
+            "callable on this Anki version (profile auto-reopen skipped)"
+        )
+        return
+    if getattr(original, _CI_BUDDY_COUNTDOWN_SHIM_ATTR, False):
+        return  # already installed
+
+    def _show_profile_manager_with_countdown(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        _safe(start_profile_picker_countdown)(delay_s)
+        return result
+
+    setattr(_show_profile_manager_with_countdown, _CI_BUDDY_COUNTDOWN_SHIM_ATTR, True)
+    if getattr(original, _CI_BUDDY_SHIM_ATTR, False):
+        setattr(_show_profile_manager_with_countdown, _CI_BUDDY_SHIM_ATTR, True)
+    mw.showProfileManager = _show_profile_manager_with_countdown
 
 
 # --------------------------------------------------------------------------- #
@@ -758,15 +854,13 @@ def register(config: dict[str, Any]) -> None:
     if any(core.deck_browser_button_lock_plan(config).values()):
         _safe(remove_deck_browser_buttons)(config)
 
-    # Seam 12: reopen the last profile when the picker sits idle. A hook, not
-    # a load-time patch: state_did_change fires on every entry to and exit
-    # from the picker, including the startup showing (hooks are appended
-    # during setupAddons, before setupProfile runs).
-    delay_ms = core.auto_reopen_profile_delay_ms(config)
-    if delay_ms > 0:
-        gui_hooks.state_did_change.append(
-            _safe(lambda new, old: on_state_did_change(new, old, delay_ms))
-        )
+    # Seam 12: hard-deadline countdown in the profile picker, then reopen the
+    # last profile. Installed NOW as a wrap of mw.showProfileManager (after
+    # Seam 9's wrap, same timing reasons): the bar needs the freshly built
+    # form, which only exists after the original call returns.
+    delay_s = core.auto_reopen_profile_delay_s(config)
+    if delay_s > 0:
+        _safe(install_profile_picker_countdown)(delay_s)
 
     # Seam 5: sync surfaces (config-gated; conservative defaults).
     if config.get("strip_sync_link", False):

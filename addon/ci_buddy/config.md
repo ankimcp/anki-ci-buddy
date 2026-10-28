@@ -116,7 +116,7 @@ warning, never a crash.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auto_reopen_profile_after_s` | `60` | When the profile picker (the screen File → Switch Profile opens) has been showing for this many seconds with no profile open, ci-buddy reopens the selected profile — the one that was open before, unless the user moved the selection — exactly as if the user had clicked **Open**. `0` (or any non-positive / non-numeric value) disables it. **Coupled to the hosted operator's readiness probe:** the MCP port is down from profile close until the reopen finishes, so the operator's readiness window (probe period × failureThreshold; 90 s as of v0.10.1) must stay longer than this delay plus profile-load time, or the pod flips NotReady mid-switch and the dashboard hides the VNC viewer. Raise both together. |
+| `auto_reopen_profile_after_s` | `60` | Hard deadline for the profile picker (the screen File → Switch Profile opens). The moment the picker shows, a progress bar at its bottom starts full and drains to zero over this many seconds ("Reopening previous profile in N s"). Nothing resets it. At zero, any open prompt (Add / Rename / Delete confirmation / warning) is **cancelled** and the selected profile — the one that was open before, unless the user moved the selection — is reopened exactly as if the user had clicked **Open**. `0` (or any non-positive / non-numeric value) disables it. **Coupled to the hosted operator's readiness probe:** the MCP port is down from profile close until the reopen finishes, so the operator's readiness window (probe period × failureThreshold; 90 s, operator ≥ 0.12.1) must stay longer than this delay plus profile-load time, or the pod flips NotReady mid-switch and the dashboard hides the VNC viewer. Change both together. |
 
 Why: on the hosted appliance, closing a profile stops the AnkiMCP add-on's
 HTTP server (it only runs while a profile is open), and nothing restarts it
@@ -125,16 +125,23 @@ away locks themselves out of MCP until someone restarts the pod
 ([anki-mcp-saas#73](https://github.com/ankimcp/anki-mcp-saas/issues/73)).
 Reopening the profile fires `profile_did_open`, which is what brings the server
 back. Profile switching stays fully available; this only bounds how long the
-picker can sit idle.
+picker can stay open, and the bar makes that bound visible.
 
-Mechanism: `gui_hooks.state_did_change` — every path to the picker goes through
-`moveToState("profileManager")`, and a successful open moves to `deckBrowser`,
-so one hook arms a single-shot `QTimer` on entry and stops it on exit. When the
-timer fires it calls `mw.onOpenProfile()`. If a modal is up (the Add / Rename
-prompt, a delete confirmation) the user is mid-task, so the timer re-arms for
-another full delay instead of interrupting. If the open fails, aqt shows the
-picker again, which re-arms — so a broken profile retries once per delay, never
-in a tight loop. Fail-open: a missing `mw.onOpenProfile` is a logged skip.
+Mechanism: ci-buddy wraps `mw.showProfileManager` (the same wrap point as Seam
+9 — the picker is rebuilt on every showing, and aqt moves state *before*
+building the form, so a `state_did_change` hook would be too early for the
+bar). After each showing it appends a `QProgressBar` to the picker's outer
+layout (`verticalLayout_3`, identical in aqt 26.5–26.9.3) and starts a 1 s
+tick `QTimer` that drains it. A tick that finds Anki no longer in the
+`profileManager` state (the user clicked Open) stops the countdown. At zero
+the active modal, if any, is **rejected** — a cancelled Add / Rename prompt
+returns `""` and a cancelled Delete confirmation returns `False`, and aqt's
+handlers return early on those, touching nothing — then `mw.onOpenProfile()`
+runs on the next event-loop turn so the modal's nested loop unwinds first.
+Every new showing restarts from a full bar, so a profile that fails to load
+(aqt shows the picker again) is retried once per delay, never in a tight loop.
+Fail-open: a missing layout runs the countdown without a bar; a missing
+`mw.onOpenProfile` is a logged skip.
 
 ### Collection editing always stays usable
 

@@ -153,17 +153,23 @@ a profile opens again, so a user who leaves the picker showing locks themselves 
 MCP until a pod restart (anki-mcp-saas#73). Decision (2026-10-20): when the picker has
 been showing for N seconds with no profile open, reopen the selected profile — the one
 that was open before unless the user moved the selection — as if **Open** were clicked;
-no Switch Profile lockout, no liveness probe. Mechanism: `gui_hooks.state_did_change`
-(every path to the picker runs `moveToState("profileManager")`; a successful open moves
-to `deckBrowser`) arms / stops one single-shot `QTimer`; on fire, `mw.onOpenProfile()`
-(verified identical across aqt 26.5–26.9.3). A visible modal re-arms instead of
-interrupting; a failed open shows the picker again, which re-arms (retry bounded by N).
-Gated by `auto_reopen_profile_after_s` (§4; default 60 since v0.10.1, `0` disables).
-Coupled to the hosted operator's readiness probe: the MCP port is down from profile
-close until the reopen finishes, so the operator's readiness window (period ×
-failureThreshold; 90 s as of v0.10.1) must stay longer than this delay plus
-profile-load time, or the pod flips NotReady mid-switch and the dashboard hides the
-VNC viewer. Raise both together.
+no Switch Profile lockout, no liveness probe. Decision (2026-10-28, v0.11.0): a **hard
+deadline with a visible countdown** — a `QProgressBar` at the bottom of the picker
+starts full the moment the picker shows and drains to zero over N; nothing resets it;
+at zero any open modal (Add / Rename / Delete confirmation / warning) is **rejected**
+(a cancelled prompt makes aqt's handlers return early, touching nothing) and the
+profile reopened. Mechanism: a wrap of `mw.showProfileManager` (Seam 9's wrap point;
+aqt moves state before building the form, so `state_did_change` is too early for the
+bar) appends the bar to `profileForm.verticalLayout_3` and starts a 1 s tick `QTimer`;
+a tick outside the `profileManager` state stops it; at zero, reject the modal, then
+`mw.onOpenProfile()` on the next event-loop turn (verified identical across aqt
+26.5–26.9.3). Every showing restarts from full, so a failed open retries once per N,
+never in a tight loop. Gated by `auto_reopen_profile_after_s` (§4; default 60 since
+v0.10.1, `0` disables). Coupled to the hosted operator's readiness probe: the MCP port
+is down from profile close until the reopen finishes, so the operator's readiness
+window (period × failureThreshold; 90 s, operator ≥ 0.12.1) must stay longer than
+this delay plus profile-load time, or the pod flips NotReady mid-switch and the
+dashboard hides the VNC viewer. Change both together.
 
 ### Borderline actions — config-gated (default = locked)
 Destructive (can replace/destroy the whole collection): `actionImport` (File → Import),
@@ -341,9 +347,11 @@ coverage you don't have.
       profile-manager screen's dangerous buttons locked; `writeConfig` neutered.
 - [ ] Add / Browse / Study / Decks / Stats / Note Types still open and work.
 - [ ] Programmatic `dialogs.open("Preferences"|"AddonsDialog")` disabled; other dialogs unaffected.
-- [ ] File → Switch Profile, leave the picker idle: after 60 s the previous profile
-      reopens on its own and the AnkiMCP port is listening again; an Add/Rename prompt
-      left open is not interrupted.
+- [ ] File → Switch Profile: a progress bar at the bottom of the picker starts full and
+      drains over 60 s; at zero the previous profile reopens on its own and the AnkiMCP
+      port is listening again; the pod never flips NotReady. An Add/Rename prompt left
+      open at zero is cancelled (no profile created/renamed) and the reopen still
+      happens.
 - [ ] Decks screen bottom bar shows only Create Deck (no Get Shared / Import File), and
       Create Deck still works.
 - [ ] ci-buddy never reads/writes/clears any sync credential (Part B): a manual AnkiWeb

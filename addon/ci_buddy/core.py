@@ -52,12 +52,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lock_profile_manager_downgrade": True,
     "lock_deck_browser_get_shared": True,
     "lock_deck_browser_import": True,
-    # Seam 12 (v0.10.0): reopen the last profile when the profile picker has
-    # been showing this long with no profile open; 0 disables. COUPLED to the
-    # hosted operator's readiness probe: the MCP port is down from profile
-    # close until the reopen finishes, so the operator's readiness window
-    # (period × failureThreshold, 90 s as of v0.10.1) must stay longer than
-    # this delay plus profile-load time, or the pod flips NotReady mid-switch.
+    # Seam 12 (v0.10.0): hard deadline for the profile picker — a countdown
+    # bar drains over this many seconds, then any modal is closed and the
+    # last profile reopened; 0 disables. COUPLED to the hosted operator's
+    # readiness probe: the MCP port is down from profile close until the
+    # reopen finishes, so the operator's readiness window (period ×
+    # failureThreshold; 90 s, operator ≥ 0.12.1) must stay longer than this
+    # delay plus profile-load time, or the pod flips NotReady mid-switch.
+    # Changing this means changing the operator's threshold with it.
     "auto_reopen_profile_after_s": 60,
     "lock_debug_console": True,
     "sanitize_copy_debug_info": True,
@@ -305,20 +307,21 @@ def filter_deck_browser_links(links: list[Any], removed_cmds: set[str]) -> list[
 PROFILE_MANAGER_STATE = "profileManager"
 
 
-def auto_reopen_profile_delay_ms(config: dict[str, Any]) -> int:
-    """Milliseconds the profile picker may sit open before ci-buddy reopens
-    the last profile (Seam 12), or ``0`` when the seam is off.
+def auto_reopen_profile_delay_s(config: dict[str, Any]) -> int:
+    """Whole seconds the profile picker may stay open before ci-buddy closes
+    any modal and reopens the last profile (Seam 12), or ``0`` when the seam
+    is off.
 
-    ``auto_reopen_profile_after_s`` must be a positive number; ``0``,
-    negatives, bools and anything non-numeric disable the seam (fail open —
-    a typo in config never turns into a tight reopen loop).
+    ``auto_reopen_profile_after_s`` must be a number of at least ``1``;
+    fractions are truncated, and ``0``, negatives, bools and anything
+    non-numeric disable the seam (fail open — a typo in config never turns
+    into a tight reopen loop).
     """
     value = config.get("auto_reopen_profile_after_s", 0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
-    if value <= 0:
-        return 0
-    return int(value * 1000)
+    seconds = int(value)
+    return seconds if seconds > 0 else 0
 
 
 # --------------------------------------------------------------------------- #

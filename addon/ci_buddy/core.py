@@ -131,7 +131,7 @@ PROFILE_MANAGER_LOCK_MAP: dict[str, str] = {
 #: (Seam 11), keyed by the button's ``pycmd`` command — NOT its label, which is
 #: translated. ``aqt.deckbrowser.DeckBrowser.drawLinks`` is a list of
 #: ``[shortcut, cmd, label]`` entries: ``shared`` (Get Shared), ``create``
-#: (Create Deck), ``import`` (Import File) — verified against aqt 26.5–26.9.3.
+#: (Create Deck), ``import`` (Import File) — verified against aqt 26.5–26.9.4.
 #: ``create`` is deliberately absent: Create Deck must stay usable (§A.4).
 DECK_BROWSER_BUTTON_LOCK_MAP: dict[str, str] = {
     "lock_deck_browser_get_shared": "shared",
@@ -500,6 +500,7 @@ SUPPORTED_ANKI_VERSIONS: tuple[str, ...] = (
     "26.09",
     "26.09.2",
     "26.09.3",
+    "26.09.4",
 )
 
 #: Greppable marker on every stderr line of the unsupported-Anki warning

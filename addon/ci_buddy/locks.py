@@ -541,7 +541,7 @@ def remove_deck_browser_buttons(config: dict[str, Any]) -> None:
     """Remove the locked buttons (Get Shared / Import File) from the deck
     browser's bottom bar (Seam 11). Create Deck stays.
 
-    MECHANISM (verified against aqt 26.5, 26.8.1, 26.9, 26.9.2, 26.9.3,
+    MECHANISM (verified against aqt 26.5, 26.8.1, 26.9, 26.9.2–26.9.4,
     ``qt/aqt/deckbrowser.py``): the bar is built by ``DeckBrowser._drawButtons``
     on every render from the CLASS attribute ``drawLinks`` — a list of
     ``[shortcut, cmd, label]`` entries (``shared`` / ``create`` / ``import``)
@@ -629,7 +629,7 @@ def _reopen_profile_now() -> None:
     selected profile via ``mw.onOpenProfile``.
 
     ``onOpenProfile`` hides the picker and runs ``loadProfile`` on whatever
-    ``pm`` currently holds (verified against aqt 26.5–26.9.3, ``qt/aqt/main.py``):
+    ``pm`` currently holds (verified against aqt 26.5–26.9.4, ``qt/aqt/main.py``):
     ``refreshProfilesList`` selects the previously open profile and
     ``onProfileRowChange`` already ``pm.load``s the selected row, so this is
     exactly "reopen the last profile" — or the row the user moved to. A
@@ -687,7 +687,7 @@ def _countdown_tick() -> None:
 def _install_countdown_bar(delay_s: int) -> Any:
     """Append a full QProgressBar to the picker's outer layout
     (``profileForm.verticalLayout_3``, the vertical box holding the
-    list+buttons row — identical in aqt 26.5–26.9.3 ``forms/profiles.ui``).
+    list+buttons row — identical in aqt 26.5–26.9.4 ``forms/profiles.ui``).
     Returns the bar, or ``None`` (logged) when the layout is not there — the
     countdown then runs without a visible bar, never a crash."""
     from aqt import mw  # lazy — keeps this module import-safe for tests

@@ -3,7 +3,7 @@
 Implementation spec for a small Anki add-on that (A) **locks the GUI** of a hosted / CI
 Anki instance and (B) **forces managed-environment config** the locked GUI can no longer
 reach (collection LaTeX rendering, sibling add-on UI). Written for an implementing agent.
-Target: **PyPI `aqt` 26.9.3 (the headless-anki image pin), Python 3.12+**; verified
+Target: **PyPI `aqt` 26.9.4 (the headless-anki image pin), Python 3.12+**; verified
 Anki versions are the exact-match matrix `SUPPORTED_ANKI_VERSIONS` in `core.py`. Line
 numbers below are guidance, not contracts — resolve symbols by name.
 
@@ -135,7 +135,7 @@ ci-buddy. Gated by `warn_unsupported_anki` (§4).
 Remove **Get Shared** and **Import File** from the main Decks screen's bottom bar;
 **Create Deck** stays. aqt builds that bar from the class attribute
 `aqt.deckbrowser.DeckBrowser.drawLinks` (`[shortcut, cmd, label]` entries, commands
-`shared` / `create` / `import`; verified against aqt 26.5–26.9.3) and exposes no hook
+`shared` / `create` / `import`; verified against aqt 26.5–26.9.4) and exposes no hook
 for it, so ci-buddy replaces it at add-on load time with a copy filtered by **command**
 (labels are translated). Load time, not a hook: the patch must be in place before the
 first `_drawButtons` call, and a load-time patch has no dependency on hook ordering.
@@ -163,7 +163,7 @@ aqt moves state before building the form, so `state_did_change` is too early for
 bar) appends the bar to `profileForm.verticalLayout_3` and starts a 1 s tick `QTimer`;
 a tick outside the `profileManager` state stops it; at zero, reject the modal, then
 `mw.onOpenProfile()` on the next event-loop turn (verified identical across aqt
-26.5–26.9.3). Every showing restarts from full, so a failed open retries once per N,
+26.5–26.9.4). Every showing restarts from full, so a failed open retries once per N,
 never in a tight loop. Gated by `auto_reopen_profile_after_s` (§4; default 60 since
 v0.10.1, `0` disables). Coupled to the hosted operator's readiness probe: the MCP port
 is down from profile close until the reopen finishes, so the operator's readiness
@@ -364,7 +364,7 @@ coverage you don't have.
 
 ---
 
-## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.9.3 — verify by symbol)
+## Appendix — key aqt/anki reference points (compiled against 25.9.2, not re-verified against 26.9.4 — verify by symbol)
 
 > **Re-verification note (2026-09-14):** all ten seams were re-verified by source diff
 > against aqt 26.9 (buildhash e62e7739); the reference points below were not re-checked
@@ -410,6 +410,26 @@ coverage you don't have.
 > `forms/profiles.py`) are byte-identical. In the `anki` package only `buildinfo.py` and
 > the compiled `_rsbridge` binary differ; the binary can't be source-diffed and is outside
 > the scope of this verification. The reference points below were not re-checked line by
+> line — verify by symbol.
+
+> **Re-verification note (2026-11-04):** all twelve seams were re-verified by source diff
+> against aqt 26.9.4 (buildhash c06370ff) vs 26.9.3. 26.9.4 is a security-hardening
+> point release; three Python files changed in aqt, none touched by ci-buddy:
+> `aqt/webview.py` narrows `AuthInterceptor.interceptRequest` so the API bearer token is
+> attached only to POST XHR requests to Anki's own server; `aqt/mediasrv.py` makes the
+> `openLink` bridge refuse non-`https:` URLs and makes `_redirectWebExports` return
+> `NotFound` (instead of falling through) for any add-on path it can't resolve;
+> `aqt/utils.py` passes the path to `show_in_folder`'s macOS AppleScript as an `argv`
+> argument instead of interpolating it into the script source, and factors the Linux
+> file-manager lookup into `_available_linux_file_manager()`. The bundled
+> `_aqt/data/web/sveltekit/` assets were rebuilt; after normalising hashed chunk names,
+> what remains is minifier identifier renames, the `__sveltekit` build id, `version.json`,
+> and the CSP hash — a rebuild artifact, no behaviour change. `gui_hooks`,
+> `_aqt/hooks.py`, all generated forms (including `forms/main.py` and
+> `forms/profiles.py`), `aqt/main.py`, `aqt/deckbrowser.py`, `aqt/about.py` and
+> `aqt/errors.py` are byte-identical. In the `anki` package only `buildinfo.py` and the
+> compiled `_rsbridge` binary differ; the binary can't be source-diffed and is outside the
+> scope of this verification. The reference points below were not re-checked line by
 > line — verify by symbol.
 
 - `actionPreferences` → `main.py onPrefs` → `dialogs.open("Preferences", mw)`;

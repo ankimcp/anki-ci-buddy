@@ -808,7 +808,7 @@ def test_sanitize_about_debug_info_missing_aqt_about_fails_open(
 
 
 def _stock_draw_links():
-    """``DeckBrowser.drawLinks`` as shipped in aqt 26.5–26.9.3."""
+    """``DeckBrowser.drawLinks`` as shipped in aqt 26.5–26.9.4."""
     return [
         ["", "shared", "Get Shared"],
         ["", "create", "Create Deck"],

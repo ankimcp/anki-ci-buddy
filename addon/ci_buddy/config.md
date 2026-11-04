@@ -131,7 +131,7 @@ Mechanism: ci-buddy wraps `mw.showProfileManager` (the same wrap point as Seam
 9 — the picker is rebuilt on every showing, and aqt moves state *before*
 building the form, so a `state_did_change` hook would be too early for the
 bar). After each showing it appends a `QProgressBar` to the picker's outer
-layout (`verticalLayout_3`, identical in aqt 26.5–26.9.3) and starts a 1 s
+layout (`verticalLayout_3`, identical in aqt 26.5–26.9.4) and starts a 1 s
 tick `QTimer` that drains it. A tick that finds Anki no longer in the
 `profileManager` state (the user clicked Open) stops the countdown. At zero
 the active modal, if any, is **rejected** — a cancelled Add / Rename prompt
